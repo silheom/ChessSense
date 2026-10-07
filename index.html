@@ -1,1 +1,83 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+  <title>체스센스</title>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <main class="app">
+
+    <header class="app-header">
+      <h1>체스센스</h1>
+      <p>엔진의 숫자를 사람이 이해할 수 있는 생각으로 바꿉니다.</p>
+    </header>
+
+    <section class="input-section">
+
+      <h2>게임 분석</h2>
+
+      <textarea
+        id="pgnInput"
+        placeholder="PGN을 붙여넣으세요."
+        spellcheck="false"
+      ></textarea>
+
+      <div class="button-row">
+        <button id="exampleButton" type="button">
+          예제 PGN
+        </button>
+
+        <button id="analyzeButton" type="button">
+          게임 분석 시작
+        </button>
+      </div>
+
+    </section>
+
+    <section class="board-section">
+
+      <h2>현재 포지션</h2>
+
+      <div id="board" class="board">
+        <div class="board-placeholder">
+          PGN을 입력하고 분석을 시작하세요.
+        </div>
+      </div>
+
+    </section>
+
+    <section class="analysis-section">
+
+      <h2>포지션 분석</h2>
+
+      <div id="analysisResult" class="analysis-result">
+        <p class="empty-message">
+          아직 분석된 포지션이 없습니다.
+        </p>
+      </div>
+
+    </section>
+
+    <section class="debug-section">
+
+      <details>
+        <summary>DEBUG 정보</summary>
+
+        <pre id="debugOutput">아직 분석 정보가 없습니다.</pre>
+
+      </details>
+
+    </section>
+
+  </main>
+
+  <script type="module" src="app.js"></script>
+
+</body>
+</html>
