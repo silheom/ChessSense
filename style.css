@@ -136,7 +136,6 @@ section h2 {
 .board {
   width: min(100%, 560px);
   aspect-ratio: 1 / 1;
-
   margin: 0 auto;
 
   overflow: hidden;
@@ -332,9 +331,14 @@ section h2 {
     min-height: 160px;
   }
 
+  /*
+    모바일에서도 말이 체스판 칸보다
+    커지지 않도록 기존 크기 계산을 유지한다.
+  */
+
   .white-piece,
   .black-piece {
-    font-size: 12vw;
+    font-size: clamp(28px, 8vw, 54px);
   }
 }
 
