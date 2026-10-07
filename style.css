@@ -330,3 +330,58 @@ section h2 {
     font-size: 12vw;
   }
 }
+
+.analysis-card {
+  margin-bottom: 14px;
+  padding: 14px;
+
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+
+  background: #ffffff;
+}
+
+.analysis-card-title {
+  margin-bottom: 10px;
+
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.analysis-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  padding: 9px 0;
+
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.analysis-row span {
+  color: #6b7280;
+}
+
+.analysis-row strong {
+  color: #111827;
+}
+
+.analysis-description {
+  margin-top: 12px;
+
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.analysis-note {
+  margin-top: 10px;
+  padding: 10px;
+
+  border-radius: 8px;
+
+  background: #f3f4f6;
+  color: #6b7280;
+
+  font-size: 12px;
+  line-height: 1.6;
+}
