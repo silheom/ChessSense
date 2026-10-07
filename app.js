@@ -221,10 +221,10 @@ function createPositionSnapshot(chess) {
 
 
   /*
-    먼저 폰 구조의 사실을 수집한다.
+    폰 구조를 먼저 수집한다.
 
-    마이너 피스 평가에서 현재 폰 구조와의
-    관계를 참고하기 위해 이 순서가 필요하다.
+    마이너 피스의 실전적 가치 평가에서
+    현재 폰 구조를 사용할 수 있도록 한다.
   */
 
   snapshot.pawnStructure =
@@ -235,10 +235,7 @@ function createPositionSnapshot(chess) {
 
 
   /*
-    그 다음 마이너 피스를 평가한다.
-
-    아직 공간/파일/전개/이니셔티브는
-    평가하지 않는다.
+    그 다음 마이너 피스를 분석한다.
   */
 
   snapshot.minorPieces =
@@ -436,7 +433,7 @@ function oppositeColor(color) {
 
 
 /* =========================================================
-   특정 기물의 색에 맞춰 합법적인 이동을 계산
+   특정 기물의 색에 맞춰 합법적인 이동 계산
 ========================================================= */
 
 function getLegalMovesForPiece(
@@ -825,6 +822,72 @@ function isSquareAttackedBy(
 
 
 /* =========================================================
+   특정 칸의 공격자 목록
+========================================================= */
+
+function findAttackersOfSquare(
+  board,
+  targetSquare,
+  attackerColor
+) {
+
+  const attackers = [];
+
+
+  for (let rank = 1; rank <= 8; rank++) {
+
+    for (let file = 0; file < 8; file++) {
+
+      const square =
+        coordsToSquare(
+          file,
+          rank - 1
+        );
+
+
+      const piece =
+        getBoardPiece(
+          board,
+          square
+        );
+
+
+      if (
+        !piece ||
+        piece.color !== attackerColor
+      ) {
+
+        continue;
+
+      }
+
+
+      if (
+        isPieceAttackingSquare(
+          board,
+          square,
+          targetSquare,
+          attackerColor
+        )
+      ) {
+
+        attackers.push({
+          square,
+          type: piece.type
+        });
+
+      }
+
+    }
+
+  }
+
+
+  return attackers;
+}
+
+
+/* =========================================================
    중앙성
 ========================================================= */
 
@@ -871,15 +934,9 @@ function isKnightOutpost(
   } = squareToCoords(square);
 
 
-  if (
-    file === 0 ||
-    file === 7
-  ) {
-
-    return false;
-
-  }
-
+  /*
+     상대 진영 쪽에 있는 칸이어야 한다.
+  */
 
   if (
     color === "w" &&
@@ -901,6 +958,21 @@ function isKnightOutpost(
   }
 
 
+  /*
+     가장자리 파일은 일반적인
+     아웃포스트로 보기 어렵다.
+  */
+
+  if (
+    file === 0 ||
+    file === 7
+  ) {
+
+    return false;
+
+  }
+
+
   const board =
     chess.board();
 
@@ -909,13 +981,23 @@ function isKnightOutpost(
     oppositeColor(color);
 
 
-  if (
-    isSquareAttackedBy(
+  /*
+     현재 칸이 상대 폰에게 공격받고 있다면
+     지속 가능한 아웃포스트 후보로 보지 않는다.
+  */
+
+  const enemyPawnAttack =
+    findAttackersOfSquare(
       board,
       square,
       enemy
-    )
-  ) {
+    ).some(
+      (attacker) =>
+        attacker.type === "p"
+    );
+
+
+  if (enemyPawnAttack) {
 
     return false;
 
@@ -923,6 +1005,114 @@ function isKnightOutpost(
 
 
   return true;
+}
+
+
+/* =========================================================
+   나이트 아웃포스트 지속 가능성
+========================================================= */
+
+function evaluateKnightOutpostDurability(
+  chess,
+  piece
+) {
+
+  if (
+    piece.type !== "n" ||
+    !piece.outpostCandidate
+  ) {
+
+    return {
+
+      score: 0,
+
+      reasons: []
+
+    };
+
+  }
+
+
+  const board =
+    chess.board();
+
+
+  const enemy =
+    oppositeColor(
+      piece.color
+    );
+
+
+  const attackers =
+    findAttackersOfSquare(
+      board,
+      piece.square,
+      enemy
+    );
+
+
+  const enemyPawnAttackers =
+    attackers.filter(
+      (item) =>
+        item.type === "p"
+    );
+
+
+  const enemyMinorAttackers =
+    attackers.filter(
+      (item) =>
+        item.type === "n" ||
+        item.type === "b"
+    );
+
+
+  let score = 0;
+
+  const reasons = [];
+
+
+  if (
+    enemyPawnAttackers.length === 0
+  ) {
+
+    score += 8;
+
+    reasons.push(
+      "현재 위치를 상대 폰으로 바로 쫓아내기 어려움"
+    );
+
+  } else {
+
+    score -= 8;
+
+    reasons.push(
+      "상대 폰으로 쫓아낼 가능성이 있음"
+    );
+
+  }
+
+
+  if (
+    enemyMinorAttackers.length === 0
+  ) {
+
+    score += 3;
+
+    reasons.push(
+      "상대 마이너 피스의 직접적인 압박이 제한적임"
+    );
+
+  }
+
+
+  return {
+
+    score,
+
+    reasons
+
+  };
+
 }
 
 
@@ -959,7 +1149,9 @@ function analyzeBishopDiagonals(
 
       blockedDiagonals: 0,
 
-      longDiagonalAccess: 0
+      longDiagonalAccess: 0,
+
+      usefulTargets: []
 
     };
 
@@ -989,6 +1181,8 @@ function analyzeBishopDiagonals(
   let blockedDiagonals = 0;
 
   let longDiagonalAccess = 0;
+
+  const usefulTargets = [];
 
 
   for (
@@ -1038,6 +1232,17 @@ function analyzeBishopDiagonals(
         ) {
 
           reachableSquares += 1;
+
+
+          usefulTargets.push({
+
+            square:
+              currentSquare,
+
+            type:
+              targetPiece.type
+
+          });
 
         }
 
@@ -1089,7 +1294,9 @@ function analyzeBishopDiagonals(
 
     blockedDiagonals,
 
-    longDiagonalAccess
+    longDiagonalAccess,
+
+    usefulTargets
 
   };
 
@@ -1135,6 +1342,12 @@ function analyzeMinorPiece(
   const destinationSquares = [];
 
 
+  const captureTargets = [];
+
+
+  const safeDestinationSquares = [];
+
+
   for (
     const move of legalMoves
   ) {
@@ -1147,6 +1360,17 @@ function analyzeMinorPiece(
     if (move.captured) {
 
       captureMoves += 1;
+
+
+      captureTargets.push({
+
+        square:
+          move.to,
+
+        type:
+          move.captured
+
+      });
 
     }
 
@@ -1201,6 +1425,10 @@ function analyzeMinorPiece(
       if (safe) {
 
         safeMoves += 1;
+
+        safeDestinationSquares.push(
+          move.to
+        );
 
       }
 
@@ -1261,6 +1489,42 @@ function analyzeMinorPiece(
 
   }
 
+
+  /*
+     현재 위치에서 직접 공격하고 있는
+     상대 기물 목록.
+  */
+
+  const board =
+    chess.board();
+
+
+  const enemy =
+    oppositeColor(color);
+
+
+  const directAttackers =
+    findAttackersOfSquare(
+      board,
+      square,
+      enemy
+    );
+
+
+  const defendedBy =
+    findAttackersOfSquare(
+      board,
+      square,
+      color
+    );
+
+
+  /*
+     활동성 참고값
+
+     이것은 "기물이 얼마나 움직일 수 있는가"만
+     보여주는 별도의 지표다.
+  */
 
   let activityScore = 0;
 
@@ -1340,6 +1604,8 @@ function analyzeMinorPiece(
 
     captureMoves,
 
+    captureTargets,
+
     centralMoves,
 
     centrality,
@@ -1350,6 +1616,12 @@ function analyzeMinorPiece(
 
     destinationSquares,
 
+    safeDestinationSquares,
+
+    directAttackers,
+
+    defendedBy,
+
     activityScore
 
   };
@@ -1359,13 +1631,6 @@ function analyzeMinorPiece(
 
 /* =========================================================
    마이너 피스의 폰 구조 적합성
-=========================================================
-
-   이것은 "비숍은 좋고 나이트는 나쁘다" 같은
-   일반 규칙을 적용하는 함수가 아니다.
-
-   현재 포지션에서 해당 기물이 실제 폰 구조와
-   어떤 관계를 갖는지 기록한다.
 ========================================================= */
 
 function evaluatePawnFitForMinorPiece(
@@ -1392,25 +1657,18 @@ function evaluatePawnFitForMinorPiece(
       : pawnStructure.black;
 
 
+  const enemyData =
+    piece.color === "w"
+      ? pawnStructure.black
+      : pawnStructure.white;
+
+
   const reasons = [];
 
   let score = 0;
 
 
   if (piece.type === "b") {
-
-    const ownPawns =
-      sideData.pawns || [];
-
-
-    const sameColorPawnCount =
-      ownPawns.length;
-
-
-    /*
-       비숍의 대각선을 막을 수 있는
-       자기 폰의 존재를 간접적으로 기록한다.
-    */
 
     const bishopInfo =
       piece.bishopInfo;
@@ -1421,7 +1679,7 @@ function evaluatePawnFitForMinorPiece(
       bishopInfo.blockedDiagonals === 0
     ) {
 
-      score += 8;
+      score += 7;
 
       reasons.push(
         "자기 폰에 의해 막힌 대각선이 적음"
@@ -1432,7 +1690,7 @@ function evaluatePawnFitForMinorPiece(
       bishopInfo.blockedDiagonals >= 2
     ) {
 
-      score -= 8;
+      score -= 7;
 
       reasons.push(
         "자기 폰에 의해 막힌 대각선이 많음"
@@ -1446,7 +1704,7 @@ function evaluatePawnFitForMinorPiece(
       bishopInfo.longDiagonalAccess >= 1
     ) {
 
-      score += 5;
+      score += 4;
 
       reasons.push(
         "장거리 대각선 접근 가능"
@@ -1455,12 +1713,47 @@ function evaluatePawnFitForMinorPiece(
     }
 
 
+    if (
+      bishopInfo &&
+      bishopInfo.usefulTargets &&
+      bishopInfo.usefulTargets.length
+    ) {
+
+      score += Math.min(
+        6,
+        bishopInfo.usefulTargets.length * 3
+      );
+
+      reasons.push(
+        "대각선 끝에서 상대 기물이나 폰에 실제 접근 가능"
+      );
+
+    }
+
+
     /*
-       폰 수 자체는 우열의 근거가 아니므로
-       직접 점수에는 넣지 않는다.
+       폰 구조에 존재하는 브레이크가
+       비숍의 선을 열 가능성을 기록한다.
+
+       이것은 즉시 좋은 비숍이라는 뜻이 아니라
+       "앞으로 개선될 가능성"이다.
     */
 
-    void sameColorPawnCount;
+    if (
+      sideData.breaks &&
+      sideData.breaks.length
+    ) {
+
+      score += 2;
+
+      reasons.push(
+        "폰 브레이크를 통해 대각선이 더 열릴 가능성이 있음"
+      );
+
+    }
+
+
+    void enemyData;
 
   }
 
@@ -1471,7 +1764,7 @@ function evaluatePawnFitForMinorPiece(
       piece.outpostCandidate
     ) {
 
-      score += 10;
+      score += 7;
 
       reasons.push(
         "현재 칸에서 아웃포스트 후보 성격이 있음"
@@ -1484,7 +1777,7 @@ function evaluatePawnFitForMinorPiece(
       piece.centralMoves >= 2
     ) {
 
-      score += 5;
+      score += 4;
 
       reasons.push(
         "여러 중앙 접근 경로를 가짐"
@@ -1494,18 +1787,31 @@ function evaluatePawnFitForMinorPiece(
 
 
     /*
-       나이트는 현재 폰 구조에서
-       공격 대상이 되는 폰과 접근 경로가
-       존재하는지 추가로 기록한다.
+       자기 폰 구조에 공격받고 있는
+       상대 폰이 존재하는 경우에는
+       실제 계획과 연결될 가능성을 조금 높인다.
+
+       단, 공격 가능 = 약점이라고 판단하지 않는다.
     */
 
-    const targetCount =
-      sideData.targets
-        ? sideData.targets.length
-        : 0;
+    const attackableTargets =
+      enemyData.targets || [];
 
 
-    void targetCount;
+    if (
+      attackableTargets.length
+    ) {
+
+      score += Math.min(
+        6,
+        attackableTargets.length * 2
+      );
+
+      reasons.push(
+        "상대 폰 구조에서 실제 접근 가능한 대상이 관측됨"
+      );
+
+    }
 
   }
 
@@ -1522,85 +1828,378 @@ function evaluatePawnFitForMinorPiece(
 
 
 /* =========================================================
+   상대 기물/폰 대상의 실질적 가치
+========================================================= */
+
+function evaluateTargetAccess(
+  chess,
+  piece
+) {
+
+  const board =
+    chess.board();
+
+
+  const enemy =
+    oppositeColor(
+      piece.color
+    );
+
+
+  const targets = [];
+
+
+  /*
+     현재 기물의 합법적인 잡기 가능 수를 조사한다.
+  */
+
+  const legalMoves =
+    getLegalMovesForPiece(
+      chess,
+      piece.square,
+      piece.color
+    );
+
+
+  for (
+    const move of legalMoves
+  ) {
+
+    if (!move.captured) {
+      continue;
+    }
+
+
+    const targetPiece =
+      getBoardPiece(
+        board,
+        move.to
+      );
+
+
+    if (
+      !targetPiece ||
+      targetPiece.color !== enemy
+    ) {
+
+      continue;
+
+    }
+
+
+    const defenders =
+      findAttackersOfSquare(
+        board,
+        move.to,
+        enemy
+      );
+
+
+    /*
+       방어자가 많다고 해서
+       공격 가치가 0이 되는 것은 아니다.
+
+       여기서는 "접근 가능성"을 기록한다.
+    */
+
+    let value = 2;
+
+
+    if (
+      targetPiece.type === "q" ||
+      targetPiece.type === "r"
+    ) {
+
+      value += 3;
+
+    } else if (
+      targetPiece.type === "b" ||
+      targetPiece.type === "n"
+    ) {
+
+      value += 2;
+
+    } else if (
+      targetPiece.type === "p"
+    ) {
+
+      value += 1;
+
+    }
+
+
+    if (
+      defenders.length === 0
+    ) {
+
+      value += 3;
+
+    } else if (
+      defenders.length === 1
+    ) {
+
+      value += 1;
+
+    } else {
+
+      value -= 1;
+
+    }
+
+
+    targets.push({
+
+      square:
+        move.to,
+
+      type:
+        targetPiece.type,
+
+      defenders:
+        defenders.map(
+          (item) =>
+            item.square
+        ),
+
+      value
+
+    });
+
+  }
+
+
+  /*
+     현재 칸 자체가 상대 기물에 의해
+     공격받고 있는지도 기록한다.
+  */
+
+  const attackers =
+    findAttackersOfSquare(
+      board,
+      piece.square,
+      enemy
+    );
+
+
+  return {
+
+    targets,
+
+    attackers
+
+  };
+
+}
+
+
+/* =========================================================
    마이너 피스 실전적 가치 평가
 =========================================================
 
    중요:
+
    이 값은 Stockfish 평가값이 아니다.
 
-   다음 정보를 조합한 ChessSense 내부 지표다.
+   활동성 자체를 그대로 우세라고 판단하지 않고
 
-   - 활동성
-   - 안전한 이동
-   - 중앙 접근
-   - 아웃포스트 후보
-   - 비숍 대각선
-   - 폰 구조와의 관계
-   - 같은 진영의 다른 마이너 피스와의 관계
+   1. 이동 가능성
+   2. 안전성
+   3. 중앙 접근
+   4. 실제 대상 접근
+   5. 아웃포스트 지속 가능성
+   6. 비숍 대각선 활용
+   7. 폰 구조와의 적합성
+   8. 같은 진영의 다른 기물과의 관계
 
-   이 단계에서는 "확정적인 우세"보다
-   "실전적 우세 후보"를 찾는 것을 목표로 한다.
+   를 종합한다.
 ========================================================= */
 
 function evaluateMinorPieceQuality(
+  chess,
   piece,
   sideData,
   pawnStructure
 ) {
 
-  let score =
-    piece.activityScore;
+  /*
+     실전적 가치의 기본값은
+     활동성 참고값을 그대로 복사하지 않는다.
 
+     여러 요소를 별도로 계산한다.
+  */
+
+  let score = 40;
 
   const reasons = [];
 
 
   /*
-     안전성
+     ------------------------------------------------------
+     1. 이동 가능성
+     ------------------------------------------------------
   */
 
   if (
-    piece.mobilityRatio >= 0.60
+    piece.legalMobility >= 6
   ) {
 
-    score += 7;
+    score += 8;
 
     reasons.push(
-      "안전하게 이동할 수 있는 칸의 비율이 높음"
+      "이동 가능한 칸이 많음"
+    );
+
+  } else if (
+    piece.legalMobility <= 2
+  ) {
+
+    score -= 7;
+
+    reasons.push(
+      "이동 가능한 칸이 제한적임"
+    );
+
+  } else {
+
+    score += 3;
+
+  }
+
+
+  /*
+     ------------------------------------------------------
+     2. 안전한 이동
+     ------------------------------------------------------
+  */
+
+  if (
+    piece.mobilityRatio >= 0.65
+  ) {
+
+    score += 9;
+
+    reasons.push(
+      "이동 가능 칸 중 안전한 칸의 비율이 높음"
     );
 
   } else if (
     piece.mobilityRatio < 0.30
   ) {
 
-    score -= 6;
+    score -= 9;
 
     reasons.push(
-      "안전한 이동 칸이 제한적임"
+      "안전하게 이동할 수 있는 칸이 제한적임"
     );
+
+  } else {
+
+    score += 2;
 
   }
 
 
   /*
-     중앙 접근
+     ------------------------------------------------------
+     3. 중앙 접근
+     ------------------------------------------------------
   */
 
   if (
     piece.centralMoves >= 2
   ) {
 
-    score += 4;
+    score += 6;
 
     reasons.push(
       "중앙으로 접근할 수 있는 이동이 여러 개 있음"
+    );
+
+  } else if (
+    piece.centralMoves === 0
+  ) {
+
+    score -= 2;
+
+  }
+
+
+  /*
+     ------------------------------------------------------
+     4. 실제 공격 대상
+     ------------------------------------------------------
+  */
+
+  const targetAccess =
+    evaluateTargetAccess(
+      chess,
+      piece
+    );
+
+
+  piece.targetAccess =
+    targetAccess;
+
+
+  if (
+    targetAccess.targets.length
+  ) {
+
+    const totalTargetValue =
+      targetAccess.targets.reduce(
+        (sum, target) =>
+          sum + target.value,
+        0
+      );
+
+
+    score += Math.min(
+      12,
+      totalTargetValue
+    );
+
+
+    reasons.push(
+      `현재 위치에서 실제로 접근 가능한 상대 대상 ${targetAccess.targets.length}개가 있음`
     );
 
   }
 
 
   /*
-     나이트
+     ------------------------------------------------------
+     5. 현재 기물의 안전성
+     ------------------------------------------------------
+  */
+
+  if (
+    targetAccess.attackers.length === 0
+  ) {
+
+    score += 5;
+
+    reasons.push(
+      "현재 기물에 대한 직접적인 상대 압박이 없음"
+    );
+
+  } else {
+
+    score -= Math.min(
+      8,
+      targetAccess.attackers.length * 3
+    );
+
+    reasons.push(
+      "현재 기물이 상대 기물의 직접적인 압박을 받고 있음"
+    );
+
+  }
+
+
+  /*
+     ------------------------------------------------------
+     6. 나이트
+     ------------------------------------------------------
   */
 
   if (
@@ -1611,11 +2210,37 @@ function evaluateMinorPieceQuality(
       piece.outpostCandidate
     ) {
 
-      score += 10;
+      score += 8;
 
       reasons.push(
         "현재 위치에 아웃포스트 후보 성격이 있음"
       );
+
+
+      const durability =
+        evaluateKnightOutpostDurability(
+          chess,
+          piece
+        );
+
+
+      piece.outpostDurability =
+        durability;
+
+
+      score +=
+        durability.score;
+
+
+      for (
+        const reason of durability.reasons
+      ) {
+
+        reasons.push(
+          reason
+        );
+
+      }
 
     }
 
@@ -1624,11 +2249,20 @@ function evaluateMinorPieceQuality(
       piece.captureMoves >= 2
     ) {
 
-      score += 3;
+      score += 4;
 
       reasons.push(
-        "현재 위치에서 여러 기물을 공격할 수 있음"
+        "현재 위치에서 여러 상대 기물에 접근 가능"
       );
+
+    }
+
+
+    if (
+      piece.safeMobility >= 3
+    ) {
+
+      score += 3;
 
     }
 
@@ -1636,7 +2270,9 @@ function evaluateMinorPieceQuality(
 
 
   /*
-     비숍
+     ------------------------------------------------------
+     7. 비숍
+     ------------------------------------------------------
   */
 
   if (
@@ -1669,11 +2305,30 @@ function evaluateMinorPieceQuality(
 
     }
 
+
+    if (
+      piece.bishopInfo.usefulTargets &&
+      piece.bishopInfo.usefulTargets.length
+    ) {
+
+      score += Math.min(
+        7,
+        piece.bishopInfo.usefulTargets.length * 3
+      );
+
+      reasons.push(
+        "대각선 끝에서 실제 상대 대상을 바라보고 있음"
+      );
+
+    }
+
   }
 
 
   /*
-     폰 구조와의 관계
+     ------------------------------------------------------
+     8. 폰 구조와의 관계
+     ------------------------------------------------------
   */
 
   const pawnFit =
@@ -1703,27 +2358,253 @@ function evaluateMinorPieceQuality(
 
 
   /*
-     같은 진영의 다른 마이너 피스가
-     너무 적어지는 경우에는 단순 평균 비교가
-     왜곡될 수 있으므로 개별 점수는 별도로 보존한다.
+     ------------------------------------------------------
+     9. 같은 진영 마이너 피스와의 관계
+     ------------------------------------------------------
   */
 
-  void sideData;
+  const ownMinorPieces =
+    sideData.pieces.filter(
+      (item) =>
+        (
+          item.type === "b" ||
+          item.type === "n"
+        ) &&
+        item.square !== piece.square
+    );
 
+
+  if (
+    ownMinorPieces.length === 0
+  ) {
+
+    /*
+       마이너 피스가 하나뿐인 경우
+       평균 계산에서 특별히 유리/불리하게
+       만들지 않는다.
+    */
+
+  }
+
+
+  /*
+     최종 범위.
+
+     이것은 엔진 점수가 아니다.
+  */
 
   score =
     Math.max(
       0,
       Math.min(
-        120,
+        100,
         Math.round(score)
+      )
+    );
+
+
+  /*
+     같은 이유가 반복되는 것을 방지한다.
+  */
+
+  const uniqueReasons =
+    [...new Set(reasons)];
+
+
+  return {
+
+    score,
+
+    reasons:
+      uniqueReasons.slice(
+        0,
+        6
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   진영 전체의 마이너 피스 관계 평가
+========================================================= */
+
+function evaluateMinorSideQuality(
+  pieces,
+  sideData,
+  pawnStructure,
+  color
+) {
+
+  if (!pieces.length) {
+
+    return {
+
+      average: null,
+
+      strongest: null,
+
+      weakest: null,
+
+      bishopPair: false,
+
+      score: null,
+
+      reasons: []
+
+    };
+
+  }
+
+
+  const bishops =
+    pieces.filter(
+      (piece) =>
+        piece.type === "b"
+    );
+
+
+  const knights =
+    pieces.filter(
+      (piece) =>
+        piece.type === "n"
+    );
+
+
+  const bishopPair =
+    bishops.length >= 2;
+
+
+  /*
+     개별 기물 평가
+  */
+
+  for (
+    const piece of pieces
+  ) {
+
+    const quality =
+      evaluateMinorPieceQuality(
+        color === "w"
+          ? piece.chess
+          : piece.chess,
+        piece,
+        sideData,
+        pawnStructure
+      );
+
+
+    piece.qualityScore =
+      quality.score;
+
+
+    piece.qualityReasons =
+      quality.reasons;
+
+  }
+
+
+  const sorted =
+    [...pieces].sort(
+      (a, b) =>
+        b.qualityScore -
+        a.qualityScore
+    );
+
+
+  const strongest =
+    sorted[0] || null;
+
+
+  const weakest =
+    sorted[
+      sorted.length - 1
+    ] || null;
+
+
+  const average =
+    Math.round(
+      pieces.reduce(
+        (sum, piece) =>
+          sum + piece.qualityScore,
+        0
+      ) /
+      pieces.length
+    );
+
+
+  /*
+     비숍 페어는 "자동 우세"가 아니다.
+
+     현재 단계에서는 작은 보조값만 준다.
+  */
+
+  let sideScore =
+    average;
+
+
+  const reasons = [];
+
+
+  if (
+    bishopPair
+  ) {
+
+    sideScore += 3;
+
+    reasons.push(
+      "비숍 페어를 보유하고 있음"
+    );
+
+  }
+
+
+  if (
+    strongest
+  ) {
+
+    reasons.push(
+      `가장 실전적 가치가 높은 후보는 ${strongest.name} ${strongest.square}`
+    );
+
+  }
+
+
+  if (
+    weakest &&
+    weakest !== strongest
+  ) {
+
+    reasons.push(
+      `가장 제한된 마이너 피스는 ${weakest.name} ${weakest.square}`
+    );
+
+  }
+
+
+  sideScore =
+    Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(sideScore)
       )
     );
 
 
   return {
 
-    score,
+    average,
+
+    strongest,
+
+    weakest,
+
+    bishopPair,
+
+    score:
+      sideScore,
 
     reasons
 
@@ -1737,15 +2618,21 @@ function evaluateMinorPieceQuality(
 ========================================================= */
 
 function determineMinorPieceAdvantage(
-  whitePieces,
-  blackPieces,
-  whiteAverage,
-  blackAverage
+  whiteAnalysis,
+  blackAnalysis
 ) {
 
+  const whiteScore =
+    whiteAnalysis.score;
+
+
+  const blackScore =
+    blackAnalysis.score;
+
+
   if (
-    whiteAverage === null ||
-    blackAverage === null
+    whiteScore === null ||
+    blackScore === null
   ) {
 
     return {
@@ -1768,13 +2655,35 @@ function determineMinorPieceAdvantage(
 
 
   const difference =
-    whiteAverage -
-    blackAverage;
+    whiteScore -
+    blackScore;
 
 
   /*
-     차이가 아주 작은 경우에는
-     억지로 우세를 선언하지 않는다.
+     평균 차이만으로 우세를 선언하지 않는다.
+
+     실제로는 가장 좋은 기물과
+     가장 제한된 기물의 관계도 함께 본다.
+  */
+
+  const whiteStrongest =
+    whiteAnalysis.strongest;
+
+
+  const blackStrongest =
+    blackAnalysis.strongest;
+
+
+  const whiteWeakest =
+    whiteAnalysis.weakest;
+
+
+  const blackWeakest =
+    blackAnalysis.weakest;
+
+
+  /*
+     차이가 작으면 판단 보류.
   */
 
   if (
@@ -1786,7 +2695,7 @@ function determineMinorPieceAdvantage(
       side: null,
 
       label:
-        "뚜렷한 우세 없음",
+        "뚜렷한 우세 후보 없음",
 
       difference,
 
@@ -1810,84 +2719,125 @@ function determineMinorPieceAdvantage(
       : "b";
 
 
-  const sidePieces =
+  const own =
     side === "w"
-      ? whitePieces
-      : blackPieces;
+      ? whiteAnalysis
+      : blackAnalysis;
 
 
-  const opponentPieces =
+  const opponent =
     side === "w"
-      ? blackPieces
-      : whitePieces;
+      ? blackAnalysis
+      : whiteAnalysis;
 
 
-  const strongestPiece =
-    [...sidePieces]
-      .sort(
-        (a, b) =>
-          b.qualityScore -
-          a.qualityScore
-      )[0];
+  const ownStrongest =
+    own.strongest;
 
 
-  const weakestOpponentPiece =
-    [...opponentPieces]
-      .sort(
-        (a, b) =>
-          a.qualityScore -
-          b.qualityScore
-      )[0];
+  const opponentStrongest =
+    opponent.strongest;
+
+
+  const ownWeakest =
+    own.weakest;
+
+
+  const opponentWeakest =
+    opponent.weakest;
 
 
   const reasons = [];
 
 
   if (
-    strongestPiece &&
-    strongestPiece.reasons.length
+    ownStrongest
   ) {
 
-    reasons.push(
-      `${colorName(side)} ${strongestPiece.name} ${strongestPiece.square}: ` +
-      strongestPiece.reasons[0]
-    );
+    if (
+      ownStrongest.qualityReasons &&
+      ownStrongest.qualityReasons.length
+    ) {
+
+      reasons.push(
+        `${colorName(side)} ${ownStrongest.name} ${ownStrongest.square}: ` +
+        ownStrongest.qualityReasons[0]
+      );
+
+    }
 
   }
 
 
   if (
-    strongestPiece &&
-    strongestPiece.outpostCandidate
-  ) {
-
-    reasons.push(
-      `${colorName(side)}의 ${strongestPiece.name}이 현재 위치를 유지할 가능성을 추가 확인할 필요가 있음`
-    );
-
-  }
-
-
-  if (
-    weakestOpponentPiece
+    opponentWeakest
   ) {
 
     reasons.push(
       `${colorName(oppositeColor(side))}의 ` +
-      `${weakestOpponentPiece.name} ${weakestOpponentPiece.square}보다 ` +
-      `활용 가능한 요소가 더 많이 관측됨`
+      `${opponentWeakest.name} ${opponentWeakest.square}는 ` +
+      `현재 실전적 가치 참고값이 상대적으로 낮음`
     );
 
   }
 
 
   /*
-     차이가 너무 크다고 해서 곧바로
-     확정적인 전략적 우세라고 부르지 않는다.
+     가장 좋은 기물끼리의 차이가 매우 작으면
+     전체 평균 차이가 있더라도 판정을 낮춘다.
   */
 
   let confidence =
     "medium";
+
+
+  if (
+    ownStrongest &&
+    opponentStrongest
+  ) {
+
+    const strongestDifference =
+      ownStrongest.qualityScore -
+      opponentStrongest.qualityScore;
+
+
+    if (
+      side === "b"
+    ) {
+
+      if (
+        Math.abs(strongestDifference) < 4
+      ) {
+
+        confidence =
+          "low";
+
+
+        reasons.push(
+          "가장 좋은 마이너 피스끼리의 차이는 크지 않음"
+        );
+
+      }
+
+    } else {
+
+      if (
+        Math.abs(strongestDifference) < 4
+      ) {
+
+        confidence =
+          "low";
+
+
+        reasons.push(
+          "가장 좋은 마이너 피스끼리의 차이는 크지 않음"
+        );
+
+      }
+
+    }
+
+  }
 
 
   if (
@@ -1899,6 +2849,11 @@ function determineMinorPieceAdvantage(
 
   }
 
+
+  /*
+     신뢰도가 낮아졌다면
+     "확정적인 우세" 대신 후보라고 명시한다.
+  */
 
   return {
 
@@ -1963,6 +2918,33 @@ function analyzeSuperiorMinorPieces(
     );
 
 
+  /*
+     평가 함수에서 Chess 객체를 사용할 수 있도록
+     임시 참조를 연결한다.
+
+     JSON DEBUG에는 함수/객체를 넣지 않는다.
+  */
+
+  for (
+    const piece of whiteAnalysis
+  ) {
+
+    piece.chess =
+      chess;
+
+  }
+
+
+  for (
+    const piece of blackAnalysis
+  ) {
+
+    piece.chess =
+      chess;
+
+  }
+
+
   const whiteBishops =
     whiteAnalysis.filter(
       (piece) =>
@@ -1991,180 +2973,79 @@ function analyzeSuperiorMinorPieces(
     );
 
 
-  function averageActivity(
-    pieces
-  ) {
-
-    if (!pieces.length) {
-
-      return null;
-
-    }
-
-
-    const total =
-      pieces.reduce(
-        (sum, piece) =>
-          sum + piece.activityScore,
-        0
-      );
-
-
-    return Math.round(
-      total / pieces.length
-    );
-
-  }
-
-
-  function averageQuality(
-    pieces
-  ) {
-
-    if (!pieces.length) {
-
-      return null;
-
-    }
-
-
-    const total =
-      pieces.reduce(
-        (sum, piece) =>
-          sum + piece.qualityScore,
-        0
-      );
-
-
-    return Math.round(
-      total / pieces.length
-    );
-
-  }
-
-
   /*
-     개별 기물의 실전적 가치 평가
+     진영 전체 평가
+
+     주의:
+     여기서 quality는 activity와 별개로
+     실제 대상/안전성/구조 적합성을 다시 평가한다.
   */
 
-  for (
-    const piece of whiteAnalysis
-  ) {
-
-    const quality =
-      evaluateMinorPieceQuality(
-        piece,
-        snapshot.white,
-        snapshot.pawnStructure
-      );
-
-
-    piece.qualityScore =
-      quality.score;
-
-
-    piece.qualityReasons =
-      quality.reasons;
-
-  }
-
-
-  for (
-    const piece of blackAnalysis
-  ) {
-
-    const quality =
-      evaluateMinorPieceQuality(
-        piece,
-        snapshot.black,
-        snapshot.pawnStructure
-      );
-
-
-    piece.qualityScore =
-      quality.score;
-
-
-    piece.qualityReasons =
-      quality.reasons;
-
-  }
-
-
-  const whiteAverage =
-    averageActivity(
-      whiteAnalysis
+  const whiteSideQuality =
+    evaluateMinorSideQuality(
+      whiteAnalysis,
+      snapshot.white,
+      snapshot.pawnStructure,
+      "w"
     );
 
 
-  const blackAverage =
-    averageActivity(
-      blackAnalysis
+  const blackSideQuality =
+    evaluateMinorSideQuality(
+      blackAnalysis,
+      snapshot.black,
+      snapshot.pawnStructure,
+      "b"
     );
 
 
-  const whiteQualityAverage =
-    averageQuality(
-      whiteAnalysis
-    );
+  const whiteAverageActivity =
+    whiteAnalysis.length
+      ? Math.round(
+          whiteAnalysis.reduce(
+            (sum, piece) =>
+              sum + piece.activityScore,
+            0
+          ) /
+          whiteAnalysis.length
+        )
+      : null;
 
 
-  const blackQualityAverage =
-    averageQuality(
-      blackAnalysis
-    );
+  const blackAverageActivity =
+    blackAnalysis.length
+      ? Math.round(
+          blackAnalysis.reduce(
+            (sum, piece) =>
+              sum + piece.activityScore,
+            0
+          ) /
+          blackAnalysis.length
+        )
+      : null;
 
 
-  let activityDifference = null;
+  const activityDifference =
+    whiteAverageActivity !== null &&
+    blackAverageActivity !== null
+      ? whiteAverageActivity -
+        blackAverageActivity
+      : null;
 
 
-  if (
-    whiteAverage !== null &&
-    blackAverage !== null
-  ) {
-
-    activityDifference =
-      whiteAverage -
-      blackAverage;
-
-  }
-
-
-  let qualityDifference = null;
-
-
-  if (
-    whiteQualityAverage !== null &&
-    blackQualityAverage !== null
-  ) {
-
-    qualityDifference =
-      whiteQualityAverage -
-      blackQualityAverage;
-
-  }
+  const qualityDifference =
+    whiteSideQuality.score !== null &&
+    blackSideQuality.score !== null
+      ? whiteSideQuality.score -
+        blackSideQuality.score
+      : null;
 
 
   const advantage =
     determineMinorPieceAdvantage(
-      whiteAnalysis,
-      blackAnalysis,
-      whiteQualityAverage,
-      blackQualityAverage
+      whiteSideQuality,
+      blackSideQuality
     );
-
-
-  /*
-     bishop pair는 보조적인 정보로만 기록한다.
-     이것 하나만으로 우세를 확정하지 않는다.
-  */
-
-  const whiteBishopPair =
-    whiteBishops.length >= 2;
-
-
-  const blackBishopPair =
-    blackBishops.length >= 2;
 
 
   return {
@@ -2190,13 +3071,22 @@ function analyzeSuperiorMinorPieces(
         whiteKnights.length,
 
       bishopPair:
-        whiteBishopPair,
+        whiteSideQuality.bishopPair,
 
       averageActivity:
-        whiteAverage,
+        whiteAverageActivity,
 
       averageQuality:
-        whiteQualityAverage
+        whiteSideQuality.score,
+
+      strongest:
+        whiteSideQuality.strongest,
+
+      weakest:
+        whiteSideQuality.weakest,
+
+      qualityReasons:
+        whiteSideQuality.reasons
 
     },
 
@@ -2218,13 +3108,22 @@ function analyzeSuperiorMinorPieces(
         blackKnights.length,
 
       bishopPair:
-        blackBishopPair,
+        blackSideQuality.bishopPair,
 
       averageActivity:
-        blackAverage,
+        blackAverageActivity,
 
       averageQuality:
-        blackQualityAverage
+        blackSideQuality.score,
+
+      strongest:
+        blackSideQuality.strongest,
+
+      weakest:
+        blackSideQuality.weakest,
+
+      qualityReasons:
+        blackSideQuality.reasons
 
     },
 
@@ -2245,10 +3144,10 @@ function analyzeSuperiorMinorPieces(
     bishopPair: {
 
       white:
-        whiteBishopPair,
+        whiteSideQuality.bishopPair,
 
       black:
-        blackBishopPair
+        blackSideQuality.bishopPair
 
     }
 
@@ -2259,20 +3158,6 @@ function analyzeSuperiorMinorPieces(
 
 /* =========================================================
    ③ Pawn Structure
-=========================================================
-
-   여기서는 폰 구조의 "사실"을 수집한다.
-
-   중요:
-   고립 폰 = 무조건 약점
-   더블 폰 = 무조건 약점
-   패스드 폰 = 무조건 강점
-
-   으로 판단하지 않는다.
-
-   실제 약점/강점 여부는 이후
-   공격 가능성, 방어 가능성, 활동성,
-   공간, 열린 파일, 계획과 함께 판단한다.
 ========================================================= */
 
 
@@ -2431,36 +3316,6 @@ function enemyPawnAhead(
 
 
 /* ---------------------------------------------------------
-   상대 폰이 같은 파일에 존재하는지
---------------------------------------------------------- */
-
-function enemyPawnOnSameFile(
-  snapshot,
-  pawn,
-  color
-) {
-
-  const enemy =
-    oppositeColor(color);
-
-
-  const enemyPawns =
-    getPawnsByColor(
-      snapshot,
-      enemy
-    );
-
-
-  return enemyPawns.some(
-    (enemyPawn) =>
-      enemyPawn.square[0] ===
-      pawn.square[0]
-  );
-
-}
-
-
-/* ---------------------------------------------------------
    패스드 폰
 --------------------------------------------------------- */
 
@@ -2588,12 +3443,14 @@ function findPawnDefenders(
   const defenders = [];
 
 
+  const sidePieces =
+    color === "w"
+      ? currentPawnSnapshot.white.pieces
+      : currentPawnSnapshot.black.pieces;
+
+
   for (
-    const piece of (
-      color === "w"
-        ? currentPawnSnapshot.white.pieces
-        : currentPawnSnapshot.black.pieces
-    )
+    const piece of sidePieces
   ) {
 
     if (
@@ -3919,11 +4776,19 @@ function renderMinorPieceList(
           : "";
 
 
+      const targetText =
+        piece.targetAccess &&
+        piece.targetAccess.targets &&
+        piece.targetAccess.targets.length
+          ? `실제 접근 대상 ${piece.targetAccess.targets.length}개`
+          : "직접 접근 대상 뚜렷하지 않음";
+
+
       const reasonText =
         piece.qualityReasons &&
         piece.qualityReasons.length
           ? piece.qualityReasons
-              .slice(0, 2)
+              .slice(0, 3)
               .join(" · ")
           : "추가적인 우세 근거가 뚜렷하지 않음";
 
@@ -3963,6 +4828,12 @@ function renderMinorPieceList(
 
           <div class="minor-piece-detail">
 
+            ${targetText}
+
+          </div>
+
+          <div class="minor-piece-detail">
+
             ${qualityText}
 
           </div>
@@ -3986,11 +4857,11 @@ function renderSuperiorMinorPieceAnalysis(
   minor
 ) {
 
-  const whiteAverage =
+  const whiteActivity =
     minor.white.averageActivity;
 
 
-  const blackAverage =
+  const blackActivity =
     minor.black.averageActivity;
 
 
@@ -4048,6 +4919,39 @@ function renderSuperiorMinorPieceAnalysis(
   ] || "판단 신뢰도 낮음";
 
 
+  const strongestWhite =
+    minor.white.strongest;
+
+
+  const strongestBlack =
+    minor.black.strongest;
+
+
+  const strongestText = [];
+
+
+  if (
+    strongestWhite
+  ) {
+
+    strongestText.push(
+      `백: ${strongestWhite.name} ${strongestWhite.square} (${strongestWhite.qualityScore})`
+    );
+
+  }
+
+
+  if (
+    strongestBlack
+  ) {
+
+    strongestText.push(
+      `흑: ${strongestBlack.name} ${strongestBlack.square} (${strongestBlack.qualityScore})`
+    );
+
+  }
+
+
   return `
 
     <div class="analysis-card">
@@ -4074,9 +4978,9 @@ function renderSuperiorMinorPieceAnalysis(
         <span>백 활동성 참고값</span>
         <strong>
           ${
-            whiteAverage === null
+            whiteActivity === null
               ? "-"
-              : whiteAverage
+              : whiteActivity
           }
         </strong>
       </div>
@@ -4085,9 +4989,9 @@ function renderSuperiorMinorPieceAnalysis(
         <span>흑 활동성 참고값</span>
         <strong>
           ${
-            blackAverage === null
+            blackActivity === null
               ? "-"
-              : blackAverage
+              : blackActivity
           }
         </strong>
       </div>
@@ -4134,6 +5038,18 @@ function renderSuperiorMinorPieceAnalysis(
 
       </div>
 
+      <div class="analysis-description">
+
+        <strong>가장 강한 마이너 피스 후보</strong><br>
+
+        ${
+          strongestText.length
+            ? strongestText.join(" · ")
+            : "비교할 마이너 피스가 없습니다."
+        }
+
+      </div>
+
     </div>
 
 
@@ -4171,10 +5087,25 @@ function renderSuperiorMinorPieceAnalysis(
 
       <div class="analysis-description">
 
-        이번 단계에서는 단순한 이동 가능 수만 비교하지 않고,
-        안전한 이동, 중앙 접근, 아웃포스트 후보,
-        비숍의 대각선 활용, 현재 폰 구조와의 관계를
-        함께 기록하여 마이너 피스의 실전적 가치를 추정합니다.
+        이번 단계에서는 단순한 이동 가능 수만 비교하지 않습니다.
+
+        각 마이너 피스가 얼마나 안전하게 움직일 수 있는지,
+        실제로 어떤 상대 기물이나 폰에 접근할 수 있는지,
+        좋은 칸을 유지할 가능성이 있는지,
+        비숍의 대각선이 실제 대상과 연결되는지,
+        그리고 현재 폰 구조와 기물이 서로 잘 맞는지를
+        함께 확인합니다.
+
+      </div>
+
+      <div class="analysis-description">
+
+        따라서 활동성이 높은 기물이라고 해서
+        자동으로 우세한 마이너 피스로 판정하지 않습니다.
+
+        특히 비숍 페어 역시 자동으로 우세를 선언하지 않고,
+        실제 포지션에서 그 장점을 사용할 수 있는지를
+        이후 단계에서 다시 확인합니다.
 
       </div>
 
@@ -4185,8 +5116,8 @@ function renderSuperiorMinorPieceAnalysis(
         실제 승률이 아닙니다.
 
         또한 이 단계의 "우세 후보"는 최종적인 포지션 평가가 아닙니다.
-        이후 공간, 주요 파일과 칸, 전개, 이니셔티브 등의
-        다른 불균형과 함께 다시 판단해야 합니다.
+        이후 공간, 주요 파일과 칸, 전개, 이니셔티브,
+        연결된 불균형 등을 함께 판단해야 합니다.
 
       </div>
 
@@ -4916,6 +5847,117 @@ function renderDebug(
   material
 ) {
 
+  /*
+     chess 객체 같은 비직렬화 정보는
+     DEBUG에서 제거한다.
+  */
+
+  function cleanMinorPiece(
+    piece
+  ) {
+
+    const {
+      chess,
+      ...cleaned
+    } = piece;
+
+
+    return cleaned;
+
+  }
+
+
+  const cleanMinorSide =
+    (side) => ({
+
+      pieces:
+        side.pieces.map(
+          cleanMinorPiece
+        ),
+
+      bishops:
+        side.bishops.map(
+          cleanMinorPiece
+        ),
+
+      knights:
+        side.knights.map(
+          cleanMinorPiece
+        ),
+
+      bishopCount:
+        side.bishopCount,
+
+      knightCount:
+        side.knightCount,
+
+      bishopPair:
+        side.bishopPair,
+
+      averageActivity:
+        side.averageActivity,
+
+      averageQuality:
+        side.averageQuality,
+
+      strongest:
+        side.strongest
+          ? cleanMinorPiece(
+              side.strongest
+            )
+          : null,
+
+      weakest:
+        side.weakest
+          ? cleanMinorPiece(
+              side.weakest
+            )
+          : null,
+
+      qualityReasons:
+        side.qualityReasons
+
+    });
+
+
+  const cleanMinor = {
+
+    type:
+      snapshot.minorPieces.type,
+
+    white:
+      cleanMinorSide(
+        snapshot.minorPieces.white
+      ),
+
+    black:
+      cleanMinorSide(
+        snapshot.minorPieces.black
+      ),
+
+    activityDifference:
+      snapshot.minorPieces
+        .activityDifference,
+
+    qualityDifference:
+      snapshot.minorPieces
+        .qualityDifference,
+
+    advantage:
+      snapshot.minorPieces
+        .advantage,
+
+    importance:
+      snapshot.minorPieces
+        .importance,
+
+    bishopPair:
+      snapshot.minorPieces
+        .bishopPair
+
+  };
+
+
   const debugData = {
 
     position: {
@@ -4958,7 +6000,7 @@ function renderDebug(
 
 
     superiorMinorPiece:
-      snapshot.minorPieces,
+      cleanMinor,
 
 
     pawnStructure:
