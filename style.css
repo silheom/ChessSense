@@ -129,27 +129,82 @@ section h2 {
   transform: translateY(1px);
 }
 
+/* =========================================================
+   체스판
+========================================================= */
+
 .board {
   width: min(100%, 560px);
   aspect-ratio: 1 / 1;
   margin: 0 auto;
 
+  overflow: hidden;
+
+  border-radius: 8px;
+}
+
+.chess-board {
+  width: 100%;
+  height: 100%;
+
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+}
+
+.chess-square {
   display: flex;
   align-items: center;
   justify-content: center;
 
-  border-radius: 8px;
-  overflow: hidden;
-
-  background: #e5e7eb;
+  width: 100%;
+  height: 100%;
 }
 
-.board-placeholder {
-  padding: 20px;
-  text-align: center;
-  color: #6b7280;
-  font-size: 14px;
+.light-square {
+  background: #f0d9b5;
 }
+
+.dark-square {
+  background: #b58863;
+}
+
+.white-piece,
+.black-piece {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 100%;
+  height: 100%;
+
+  font-family:
+    "Noto Sans Symbols 2",
+    "DejaVu Sans",
+    sans-serif;
+
+  font-size: clamp(28px, 8vw, 54px);
+  line-height: 1;
+
+  user-select: none;
+}
+
+.white-piece {
+  color: #ffffff;
+  text-shadow:
+    0 1px 2px #000000,
+    0 0 2px #000000;
+}
+
+.black-piece {
+  color: #111111;
+  text-shadow:
+    0 1px 1px rgba(255, 255, 255, 0.35);
+}
+
+/* =========================================================
+   분석 결과
+========================================================= */
 
 .analysis-result {
   min-height: 120px;
@@ -160,6 +215,60 @@ section h2 {
   color: #6b7280;
   line-height: 1.6;
 }
+
+.snapshot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.snapshot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  padding: 11px 0;
+
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.snapshot-row span {
+  color: #6b7280;
+}
+
+.snapshot-row strong {
+  color: #111827;
+}
+
+.snapshot-note {
+  margin-top: 14px;
+  padding: 12px;
+
+  border-radius: 8px;
+
+  background: #f3f4f6;
+  color: #6b7280;
+
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.error-message {
+  margin: 0;
+
+  padding: 12px;
+
+  border-radius: 8px;
+
+  background: #f3f4f6;
+  color: #991b1b;
+
+  line-height: 1.6;
+}
+
+/* =========================================================
+   DEBUG
+========================================================= */
 
 .debug-section details {
   width: 100%;
@@ -182,9 +291,14 @@ section h2 {
 
   font-size: 12px;
   line-height: 1.5;
+
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* =========================================================
+   모바일
+========================================================= */
 
 @media (max-width: 520px) {
   .app {
@@ -209,5 +323,10 @@ section h2 {
 
   #pgnInput {
     min-height: 160px;
+  }
+
+  .white-piece,
+  .black-piece {
+    font-size: 12vw;
   }
 }
