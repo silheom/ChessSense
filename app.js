@@ -1,403 +1,533 @@
 import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm";
 
-const $ = (id) => document.getElementById(id);
+/*
+ * ChessSense
+ *
+ * STEP 2 — Material + Superior Minor Pieces + Pawn Structure
+ *
+ * 원칙
+ * 1. Stockfish는 계산/검증 담당.
+ * 2. ChessSense는 전략적 사실을 먼저 수집하고 해석한다.
+ * 3. 구조적 특징(detected)과 실제 약점(actual value)을 구분한다.
+ * 4. 활동성(activity)과 기물의 실질적 품질(quality)을 구분한다.
+ * 5. 현재 단계에서는 dominant imbalance / Fantasy / 후보수의 최종 판단을 하지 않는다.
+ */
 
-const pgnInput = $("pgnInput");
-const exampleButton = $("exampleButton");
-const analyzeButton = $("analyzeButton");
-const boardElement = $("board");
-const analysisResult = $("analysisResult");
-const debugOutput = $("debugOutput");
+const $ = id => document.getElementById(id);
 
+const els = {
+  inputView: $("inputView"),
+  analysisView: $("analysisView"),
+  pgnInput: $("pgnInput"),
+  analyzeBtn: $("analyzeBtn"),
+  exampleBtn: $("exampleBtn"),
+  backBtn: $("backBtn"),
+  errorBox: $("errorBox"),
+  engineStatus: $("engineStatus"),
+  board: $("board"),
+  moveList: $("moveList"),
+  moveLabel: $("moveLabel"),
+  positionLabel: $("positionLabel"),
+  gameMeta: $("gameMeta"),
+  evalValue: $("evalValue"),
+  depthValue: $("depthValue"),
+  progressBar: $("progressBar"),
+  positionInsight: $("positionInsight"),
+  candidateList: $("candidateList"),
+  humanFactors: $("humanFactors"),
+  firstBtn: $("firstBtn"),
+  prevBtn: $("prevBtn"),
+  nextBtn: $("nextBtn"),
+  lastBtn: $("lastBtn")
+};
 
-/* =========================================================
-   예제 PGN
-========================================================= */
-
-const EXAMPLE_PGN = `[Event "ChessSense Demo"]
-[Site "?"]
-[Date "2026.10.07"]
+const EXAMPLE = `[Event "Human Chess Insight Demo"]
+[Site "Local"]
+[Date "2026.01.01"]
 [Round "1"]
 [White "White"]
 [Black "Black"]
 [Result "*"]
 
-1. e4 e5
-2. Nf3 Nc6
-3. Bc4 Bc5
-4. c3 Nf6
-5. d4 exd4
-6. cxd4 Bb4+
-7. Nc3 Nxe4
-8. O-O Bxc3
-9. bxc3 d5
-10. Bb5 O-O *`;
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 *`;
 
+const ENGINE_PATH =
+  new URL("stockfish/stockfish-19-lite-single.js", import.meta.url).toString();
 
-/* =========================================================
-   기물 이름
-========================================================= */
-
-function pieceName(type) {
-
-  const names = {
-    p: "폰",
-    n: "나이트",
-    b: "비숍",
-    r: "룩",
-    q: "퀸",
-    k: "킹"
-  };
-
-  return names[type] || type;
-}
-
-
-function colorName(color) {
-
-  return color === "w"
-    ? "백"
-    : "흑";
-}
-
-
-/* =========================================================
-   기물 가치
-========================================================= */
+const COLOR_NAMES = { w: "백", b: "흑" };
+const OPPOSITE = { w: "b", b: "w" };
 
 const PIECE_VALUES = {
-
   p: 1,
   n: 3.2,
   b: 3.3,
   r: 5,
   q: 9,
   k: 0
-
 };
 
+const CENTER_SQUARES = new Set(["d4", "e4", "d5", "e5"]);
+
+const EXTENDED_CENTER = new Set([
+  "c3", "d3", "e3", "f3", "c4", "d4", "e4", "f4",
+  "c5", "d5", "e5", "f5", "c6", "d6", "e6", "f6"
+]);
+
+let engine = null;
+let engineReady = false;
+let engineInitPromise = null;
+let currentAnalysis = null;
+let analysisToken = 0;
+let positions = [];
+let currentPly = 0;
+let analysisCache = new Map();
 
 /* =========================================================
-   빈 진영 데이터
-========================================================= */
+   ENGINE
+   ========================================================= */
 
-function createEmptySideData() {
-
-  return {
-
-    pieces: [],
-    pawns: [],
-
-    material: {
-
-      p: 0,
-      n: 0,
-      b: 0,
-      r: 0,
-      q: 0,
-      k: 0
-
-    }
-
-  };
-
+function setStatus(text, type = "loading") {
+  if (!els.engineStatus) return;
+  els.engineStatus.textContent = text;
+  els.engineStatus.className = `status ${type}`;
 }
 
+function showError(text) {
+  if (!els.errorBox) return;
+  els.errorBox.textContent = text;
+  els.errorBox.hidden = false;
+}
 
-/* =========================================================
-   현재 Pawn Snapshot
-========================================================= */
+function clearError() {
+  if (!els.errorBox) return;
+  els.errorBox.hidden = true;
+  els.errorBox.textContent = "";
+}
 
-let currentPawnSnapshot = null;
+function renderProgress(percent, depth = 0) {
+  if (els.progressBar) {
+    els.progressBar.style.width =
+      `${Math.max(0, Math.min(100, percent))}%`;
+  }
 
+  if (els.depthValue) {
+    els.depthValue.textContent =
+      depth ? String(depth) : "—";
+  }
+}
 
-/* =========================================================
-   Position Snapshot
-========================================================= */
+function initEngine() {
+  if (engineInitPromise) return engineInitPromise;
 
-function createPositionSnapshot(chess) {
+  engineInitPromise = new Promise((resolve, reject) => {
+    setStatus("Stockfish 로딩 중…", "loading");
 
-  const board = chess.board();
+    try {
+      engine = new Worker(ENGINE_PATH);
+    } catch (error) {
+      reject(error);
+      return;
+    }
 
+    let phase = "boot";
 
-  const snapshot = {
+    const timer = setTimeout(() => {
+      reject(
+        new Error("Stockfish 로딩 시간이 초과되었습니다.")
+      );
+    }, 30000);
 
-    fen: chess.fen(),
+    engine.onerror = event => {
+      clearTimeout(timer);
 
-    turn: chess.turn(),
+      reject(
+        new Error(
+          event?.message || "Stockfish Worker 오류"
+        )
+      );
+    };
 
-    fullmoveNumber: chess.moveNumber(),
+    engine.onmessage = event => {
+      const line =
+        typeof event.data === "string"
+          ? event.data.trim()
+          : "";
 
-    inCheck: chess.isCheck(),
+      if (!line) return;
 
-    white: createEmptySideData(),
+      if (line === "uciok" && phase === "boot") {
+        phase = "waiting-ready";
 
-    black: createEmptySideData(),
-
-    board: [],
-
-    minorPieces: null,
-
-    pawnStructure: null
-
-  };
-
-
-  for (
-    let row = 0;
-    row < board.length;
-    row++
-  ) {
-
-    const rank = 8 - row;
-
-
-    for (
-      let col = 0;
-      col < board[row].length;
-      col++
-    ) {
-
-      const piece =
-        board[row][col];
-
-
-      if (!piece) {
-        continue;
-      }
-
-
-      const file =
-        String.fromCharCode(
-          97 + col
+        engine.postMessage(
+          "setoption name MultiPV value 3"
         );
 
-
-      const square =
-        `${file}${rank}`;
-
-
-      const pieceData = {
-
-        color: piece.color,
-
-        type: piece.type,
-
-        square
-
-      };
-
-
-      snapshot.board.push(
-        pieceData
-      );
-
-
-      const side =
-        piece.color === "w"
-          ? snapshot.white
-          : snapshot.black;
-
-
-      side.pieces.push(
-        pieceData
-      );
-
-
-      side.material[piece.type] += 1;
-
-
-      if (piece.type === "p") {
-
-        side.pawns.push(
-          pieceData
-        );
-
+        engine.postMessage("isready");
+        return;
       }
 
-    }
+      if (
+        line === "readyok" &&
+        phase === "waiting-ready"
+      ) {
+        clearTimeout(timer);
 
-  }
+        phase = "ready";
+        engineReady = true;
 
+        setStatus(
+          "Stockfish 준비 완료",
+          "ready"
+        );
 
-  /*
-    폰 구조를 먼저 수집한다.
+        resolve();
+        return;
+      }
 
-    마이너 피스의 실전적 가치 평가에서
-    현재 폰 구조를 사용할 수 있도록 한다.
-  */
+      if (currentAnalysis) {
+        currentAnalysis.onLine(line);
+      }
+    };
 
-  snapshot.pawnStructure =
-    analyzePawnStructure(
-      chess,
-      snapshot
-    );
+    engine.postMessage("uci");
+  }).catch(error => {
+    engineReady = false;
+    setStatus("엔진 오류", "error");
+    throw error;
+  });
 
-
-  /*
-    그 다음 마이너 피스를 분석한다.
-  */
-
-  snapshot.minorPieces =
-    analyzeSuperiorMinorPieces(
-      chess,
-      snapshot
-    );
-
-
-  return snapshot;
+  return engineInitPromise;
 }
 
+function parseScore(tokens) {
+  const i = tokens.indexOf("score");
 
-/* =========================================================
-   Material Analyzer
-========================================================= */
+  if (i < 0) return null;
 
-function analyzeMaterial(snapshot) {
+  const kind = tokens[i + 1];
+  const value = Number(tokens[i + 2]);
 
-  function calculateSideMaterial(sideData) {
-
-    let total = 0;
-
-
-    for (
-      const type of Object.keys(PIECE_VALUES)
-    ) {
-
-      const count =
-        sideData.material[type];
-
-
-      const value =
-        PIECE_VALUES[type];
-
-
-      total +=
-        count * value;
-
-    }
-
-
-    return total;
+  if (!kind || Number.isNaN(value)) {
+    return null;
   }
 
-
-  const whiteTotal =
-    calculateSideMaterial(
-      snapshot.white
-    );
-
-
-  const blackTotal =
-    calculateSideMaterial(
-      snapshot.black
-    );
-
-
-  const difference =
-    whiteTotal - blackTotal;
-
-
-  let advantage = "equal";
-
-  let advantageSide = null;
-
-
-  if (difference > 0.05) {
-
-    advantage = "white";
-
-    advantageSide = "w";
-
-  } else if (difference < -0.05) {
-
-    advantage = "black";
-
-    advantageSide = "b";
-
+  if (kind === "cp") {
+    return {
+      type: "cp",
+      raw: value
+    };
   }
 
+  if (kind === "mate") {
+    return {
+      type: "mate",
+      raw: value
+    };
+  }
 
-  return {
-
-    type: "material",
-
-    white: {
-
-      total: whiteTotal,
-
-      pieces:
-        snapshot.white.material
-
-    },
-
-    black: {
-
-      total: blackTotal,
-
-      pieces:
-        snapshot.black.material
-
-    },
-
-    difference,
-
-    advantage,
-
-    advantageSide,
-
-    importance: 0
-
-  };
-
+  return null;
 }
 
+function whiteScore(score, turn) {
+  if (!score) return null;
 
-/* =========================================================
-   Material 표시용 숫자
-========================================================= */
+  if (score.type === "cp") {
+    return (
+      (turn === "w"
+        ? score.raw
+        : -score.raw) / 100
+    );
+  }
+
+  const sign = score.raw > 0 ? 1 : -1;
+
+  return turn === "w"
+    ? sign * 100
+    : -sign * 100;
+}
 
 function formatScore(value) {
-
   if (
-    Math.abs(value) < 0.05
+    value === null ||
+    value === undefined ||
+    Number.isNaN(value)
   ) {
-
-    return "0.0";
-
+    return "—";
   }
 
+  if (Math.abs(value) >= 99) {
+    return value > 0 ? "+M" : "−M";
+  }
 
-  return value.toFixed(1);
+  return `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(1)}`;
+}
+/* =========================================================
+   ENGINE ANALYSIS
+   ========================================================= */
+
+function cancelCurrentAnalysis() {
+  analysisToken++;
+
+  if (currentAnalysis) {
+    currentAnalysis.cancelled = true;
+    currentAnalysis = null;
+  }
+
+  if (engineReady && engine) {
+    try {
+      engine.postMessage("stop");
+    } catch (_) {}
+  }
+}
+
+function analyzeFen(fen, depth = 10) {
+  if (!engineReady || !engine) {
+    return Promise.reject(
+      new Error("Stockfish가 아직 준비되지 않았습니다.")
+    );
+  }
+
+  const cacheKey = `${fen}|${depth}`;
+
+  if (analysisCache.has(cacheKey)) {
+    return Promise.resolve(
+      analysisCache.get(cacheKey)
+    );
+  }
+
+  cancelCurrentAnalysis();
+
+  const token = analysisToken;
+
+  return new Promise((resolve, reject) => {
+    const resultMap = new Map();
+
+    currentAnalysis = {
+      cancelled: false,
+
+      onLine(line) {
+        if (token !== analysisToken) return;
+
+        if (line === "bestmove") {
+          finish();
+          return;
+        }
+
+        if (!line.startsWith("info")) {
+          return;
+        }
+
+        const tokens = line.split(/\s+/);
+
+        const depthIndex = tokens.indexOf("depth");
+        const multipvIndex = tokens.indexOf("multipv");
+        const pvIndex = tokens.indexOf("pv");
+
+        const currentDepth =
+          depthIndex >= 0
+            ? Number(tokens[depthIndex + 1])
+            : 0;
+
+        const multiPv =
+          multipvIndex >= 0
+            ? Number(tokens[multipvIndex + 1])
+            : 1;
+
+        const score = parseScore(tokens);
+
+        const pv =
+          pvIndex >= 0
+            ? tokens.slice(pvIndex + 1)
+            : [];
+
+        if (!score) return;
+
+        resultMap.set(multiPv, {
+          multipv: multiPv,
+          depth: currentDepth,
+          score,
+          whiteScore: whiteScore(
+            score,
+            fen.split(/\s+/)[1]
+          ),
+          pv
+        });
+
+        const percent =
+          Math.min(
+            100,
+            Math.round(
+              (currentDepth / depth) * 100
+            )
+          );
+
+        renderProgress(
+          percent,
+          currentDepth
+        );
+      }
+    };
+
+    function finish() {
+      if (token !== analysisToken) {
+        reject(
+          new Error("분석이 취소되었습니다.")
+        );
+        return;
+      }
+
+      if (
+        !currentAnalysis ||
+        currentAnalysis.cancelled
+      ) {
+        reject(
+          new Error("분석이 취소되었습니다.")
+        );
+        return;
+      }
+
+      const results =
+        [...resultMap.values()]
+          .sort(
+            (a, b) =>
+              a.multipv - b.multipv
+          );
+
+      const finalResult = {
+        fen,
+        depth:
+          results.reduce(
+            (max, item) =>
+              Math.max(max, item.depth || 0),
+            0
+          ),
+        lines: results
+      };
+
+      analysisCache.set(
+        cacheKey,
+        finalResult
+      );
+
+      currentAnalysis = null;
+
+      resolve(finalResult);
+    }
+
+    currentAnalysis.onLine = (
+      originalOnLine => line => {
+        if (line === "bestmove") {
+          finish();
+          return;
+        }
+
+        originalOnLine(line);
+      }
+    )(currentAnalysis.onLine);
+
+    try {
+      engine.postMessage("ucinewgame");
+      engine.postMessage(
+        `position fen ${fen}`
+      );
+      engine.postMessage(
+        `go depth ${depth}`
+      );
+    } catch (error) {
+      currentAnalysis = null;
+      reject(error);
+    }
+  });
 }
 
 
 /* =========================================================
-   좌표 변환
-========================================================= */
+   BASIC CHESS HELPERS
+   ========================================================= */
+
+function oppositeColor(color) {
+  return OPPOSITE[color];
+}
+
+function colorName(color) {
+  return COLOR_NAMES[color] || color;
+}
+
+function clamp(value, min = 0, max = 1) {
+  return Math.max(
+    min,
+    Math.min(max, value)
+  );
+}
+
+function average(values) {
+  if (!values.length) return 0;
+
+  return (
+    values.reduce(
+      (sum, value) =>
+        sum + value,
+      0
+    ) / values.length
+  );
+}
+
+function weightedAverage(items, key) {
+  const valid =
+    items.filter(
+      item =>
+        Number.isFinite(item[key])
+    );
+
+  if (!valid.length) return 0;
+
+  return average(
+    valid.map(
+      item => item[key]
+    )
+  );
+}
+
+function getBoardPiece(chess, square) {
+  try {
+    const board = chess.board();
+
+    const file =
+      square.charCodeAt(0) -
+      "a".charCodeAt(0);
+
+    const rank =
+      8 - Number(square[1]);
+
+    if (
+      file < 0 ||
+      file > 7 ||
+      rank < 0 ||
+      rank > 7
+    ) {
+      return null;
+    }
+
+    return board[rank]?.[file] || null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function squareToCoords(square) {
+  if (
+    typeof square !== "string" ||
+    square.length !== 2
+  ) {
+    return null;
+  }
 
   const file =
-    square.charCodeAt(0) - 97;
-
+    square.charCodeAt(0) -
+    "a".charCodeAt(0);
 
   const rank =
     Number(square[1]) - 1;
-
-
-  return {
-
-    file,
-
-    rank
-
-  };
-
-}
-
-
-function coordsToSquare(file, rank) {
 
   if (
     file < 0 ||
@@ -405,365 +535,886 @@ function coordsToSquare(file, rank) {
     rank < 0 ||
     rank > 7
   ) {
-
     return null;
-
   }
 
+  return {
+    file,
+    rank
+  };
+}
+
+function coordsToSquare(file, rank) {
+  if (
+    file < 0 ||
+    file > 7 ||
+    rank < 0 ||
+    rank > 7
+  ) {
+    return null;
+  }
 
   return (
-    String.fromCharCode(97 + file) +
+    String.fromCharCode(
+      "a".charCodeAt(0) + file
+    ) +
     String(rank + 1)
   );
+}
 
+function manhattanDistance(
+  squareA,
+  squareB
+) {
+  const a =
+    squareToCoords(squareA);
+  const b =
+    squareToCoords(squareB);
+
+  if (!a || !b) return 99;
+
+  return (
+    Math.abs(a.file - b.file) +
+    Math.abs(a.rank - b.rank)
+  );
+}
+
+function chebyshevDistance(
+  squareA,
+  squareB
+) {
+  const a =
+    squareToCoords(squareA);
+  const b =
+    squareToCoords(squareB);
+
+  if (!a || !b) return 99;
+
+  return Math.max(
+    Math.abs(a.file - b.file),
+    Math.abs(a.rank - b.rank)
+  );
 }
 
 
-/* =========================================================
-   반대 색
-========================================================= */
+/*
+ * chess.js의 moves({ square })는
+ * 현재 side-to-move의 기물만 정상적으로 처리한다.
+ *
+ * 따라서 특정 색 기물의 움직임을 확인할 때는
+ * FEN의 side-to-move를 해당 색으로 바꾼 임시 Chess를 사용한다.
+ */
+function createChessForColor(
+  chess,
+  color
+) {
+  try {
+    const fenParts =
+      chess.fen().split(" ");
 
-function oppositeColor(color) {
+    fenParts[1] = color;
 
-  return color === "w"
-    ? "b"
-    : "w";
-
+    return new Chess(
+      fenParts.join(" ")
+    );
+  } catch (_) {
+    return null;
+  }
 }
-
-
-/* =========================================================
-   특정 기물의 색에 맞춰 합법적인 이동 계산
-========================================================= */
 
 function getLegalMovesForPiece(
   chess,
   square,
   color
 ) {
-
   try {
-
-    const fen =
-      chess.fen();
-
-
-    const fenParts =
-      fen.split(" ");
-
-
-    fenParts[1] =
-      color;
-
-
     const testChess =
-      new Chess(
-        fenParts.join(" ")
+      createChessForColor(
+        chess,
+        color
       );
 
+    if (!testChess) {
+      return [];
+    }
 
     return testChess.moves({
-
       square,
-
       verbose: true
-
     });
-
-  } catch (error) {
-
+  } catch (_) {
     return [];
-
   }
-
 }
 
 
-/* =========================================================
-   특정 기물의 색에 맞춘 테스트용 Chess 객체
-========================================================= */
-
-function createChessForColor(
+/*
+ * 특정 기물이 실제로 이동한 뒤
+ * 그 도착 칸이 상대 기물에게 공격받는지 확인한다.
+ *
+ * 이것은 "안전성"을 평가하기 위한 휴리스틱이다.
+ * 완전한 전술 계산을 대신하지 않는다.
+ */
+function isDestinationSafe(
   chess,
+  move,
   color
 ) {
+  try {
+    const testChess =
+      createChessForColor(
+        chess,
+        color
+      );
 
-  const fen =
-    chess.fen();
+    if (!testChess) {
+      return false;
+    }
 
+    const executed =
+      testChess.move({
+        from: move.from,
+        to: move.to,
+        promotion:
+          move.promotion || "q"
+      });
 
-  const fenParts =
-    fen.split(" ");
+    if (!executed) {
+      return false;
+    }
 
+    const enemy =
+      oppositeColor(color);
 
-  fenParts[1] =
-    color;
-
-
-  return new Chess(
-    fenParts.join(" ")
-  );
-
+    return !testChess.isAttacked(
+      move.to,
+      enemy
+    );
+  } catch (_) {
+    return false;
+  }
 }
 
 
-/* =========================================================
-   보드에서 특정 칸의 기물 가져오기
-========================================================= */
-
-function getBoardPiece(board, square) {
-
-  const {
-    file,
-    rank
-  } = squareToCoords(square);
-
-
-  return board[7 - rank]?.[file] || null;
-
-}
-
-
-/* =========================================================
-   특정 칸이 특정 색에게 공격받고 있는지
-========================================================= */
-
-function isSquareAttackedBy(
-  board,
-  targetSquare,
-  attackerColor
+/*
+ * 특정 칸을 공격하는 기물 목록.
+ *
+ * 여기서 말하는 attack은 우선 "기하학적인 공격 관계"를
+ * 수집하기 위한 것이다.
+ * 핀 때문에 실제로 움직이지 못하는 기물까지
+ * 전략적 압박 계산에서 자동으로 제외하지 않는다.
+ */
+function getAttackersOfSquare(
+  chess,
+  square,
+  color
 ) {
+  const attackers = [];
 
-  const target =
-    squareToCoords(
-      targetSquare
+  const testChess =
+    createChessForColor(
+      chess,
+      color
     );
 
+  if (!testChess) {
+    return attackers;
+  }
 
-  /*
-     폰 공격
-  */
+  const board =
+    testChess.board();
 
-  const pawnDirection =
-    attackerColor === "w"
-      ? 1
-      : -1;
+  for (let rank = 1; rank <= 8; rank++) {
+    for (
+      let fileIndex = 0;
+      fileIndex < 8;
+      fileIndex++
+    ) {
+      const from =
+        String.fromCharCode(
+          "a".charCodeAt(0) +
+            fileIndex
+        ) +
+        String(rank);
+
+      const piece =
+        getBoardPiece(
+          testChess,
+          from
+        );
+
+      if (
+        !piece ||
+        piece.color !== color
+      ) {
+        continue;
+      }
+
+      const moves =
+        getLegalMovesForPiece(
+          testChess,
+          from,
+          color
+        );
+
+      if (
+        moves.some(
+          move =>
+            move.to === square
+        )
+      ) {
+        attackers.push({
+          square: from,
+          type: piece.type
+        });
+      }
+    }
+  }
+
+  return attackers;
+}
 
 
-  for (const fileOffset of [-1, 1]) {
+/*
+ * pawn이 특정 칸을 방어하는지 확인.
+ * 일반 기물의 방어와 구분해서
+ * "pawn defender"만 따로 계산한다.
+ */
+function getPawnDefenders(
+  chess,
+  square,
+  color
+) {
+  const result = [];
+  const target =
+    squareToCoords(square);
 
+  if (!target) return result;
+
+  const pawnRank =
+    color === "w"
+      ? target.rank - 1
+      : target.rank + 1;
+
+  for (
+    const fileOffset of [-1, 1]
+  ) {
     const pawnFile =
-      target.file - fileOffset;
+      target.file + fileOffset;
 
+    if (
+      pawnFile < 0 ||
+      pawnFile > 7
+    ) {
+      continue;
+    }
 
-    const pawnRank =
-      target.rank - pawnDirection;
-
-
-    const square =
+    const pawnSquare =
       coordsToSquare(
         pawnFile,
         pawnRank
       );
 
-
-    if (!square) {
-      continue;
-    }
-
+    if (!pawnSquare) continue;
 
     const piece =
       getBoardPiece(
-        board,
-        square
+        chess,
+        pawnSquare
       );
-
 
     if (
       piece &&
-      piece.color === attackerColor &&
+      piece.color === color &&
       piece.type === "p"
     ) {
-
-      return true;
-
+      result.push(
+        pawnSquare
+      );
     }
-
   }
 
+  return result;
+}
 
-  /*
-     나이트 공격
-  */
 
-  const knightOffsets = [
+/* =========================================================
+   GAME PHASE
+   ========================================================= */
 
-    [1, 2],
-    [2, 1],
-    [2, -1],
-    [1, -2],
-    [-1, -2],
-    [-2, -1],
-    [-2, 1],
-    [-1, 2]
+function getGamePhase(chess) {
+  const fullmove =
+    chess.moveNumber();
 
-  ];
-
+  const pieceCounts = {
+    q: 0,
+    r: 0,
+    b: 0,
+    n: 0
+  };
 
   for (
-    const [df, dr] of knightOffsets
+    const row of chess.board()
   ) {
-
-    const square =
-      coordsToSquare(
-        target.file + df,
-        target.rank + dr
-      );
-
-
-    if (!square) {
-      continue;
-    }
-
-
-    const piece =
-      getBoardPiece(
-        board,
-        square
-      );
-
-
-    if (
-      piece &&
-      piece.color === attackerColor &&
-      piece.type === "n"
-    ) {
-
-      return true;
-
-    }
-
-  }
-
-
-  /*
-     킹 공격
-  */
-
-  for (let df = -1; df <= 1; df++) {
-
-    for (let dr = -1; dr <= 1; dr++) {
-
-      if (
-        df === 0 &&
-        dr === 0
-      ) {
-        continue;
-      }
-
-
-      const square =
-        coordsToSquare(
-          target.file + df,
-          target.rank + dr
-        );
-
-
-      if (!square) {
-        continue;
-      }
-
-
-      const piece =
-        getBoardPiece(
-          board,
-          square
-        );
-
-
+    for (const piece of row) {
       if (
         piece &&
-        piece.color === attackerColor &&
-        piece.type === "k"
+        pieceCounts[piece.type] !== undefined
       ) {
-
-        return true;
-
+        pieceCounts[piece.type]++;
       }
-
     }
-
   }
 
+  const queens =
+    pieceCounts.q;
+
+  const rooks =
+    pieceCounts.r;
+
+  const minors =
+    pieceCounts.b +
+    pieceCounts.n;
+
+  if (
+    fullmove <= 10 &&
+    (queens >= 2 || minors >= 6)
+  ) {
+    return "opening";
+  }
+
+  if (
+    queens === 0 &&
+    rooks <= 2 &&
+    minors <= 3
+  ) {
+    return "endgame";
+  }
+
+  return "middlegame";
+}
+
+
+/* =========================================================
+   MATERIAL
+   ========================================================= */
+
+function analyzeMaterial(chess) {
+  const sides = {
+    w: {
+      p: 0,
+      n: 0,
+      b: 0,
+      r: 0,
+      q: 0,
+      k: 0
+    },
+    b: {
+      p: 0,
+      n: 0,
+      b: 0,
+      r: 0,
+      q: 0,
+      k: 0
+    }
+  };
+
+  for (
+    const row of chess.board()
+  ) {
+    for (const piece of row) {
+      if (!piece) continue;
+
+      sides[piece.color][
+        piece.type
+      ]++;
+    }
+  }
+
+  for (const color of ["w", "b"]) {
+    sides[color].total =
+      Object.entries(
+        sides[color]
+      ).reduce(
+        (sum, [type, count]) =>
+          sum +
+          PIECE_VALUES[type] *
+            count,
+        0
+      );
+  }
+
+  const difference =
+    sides.w.total -
+    sides.b.total;
+
+  let type = "equal";
+
+  if (difference > 0.35) {
+    type = "white_advantage";
+  } else if (difference < -0.35) {
+    type = "black_advantage";
+  }
+
+  return {
+    white: sides.w,
+    black: sides.b,
+    difference,
+    type,
+    relevance: clamp(
+      Math.abs(difference) / 5
+    )
+  };
+       }
+/* =========================================================
+   MINOR PIECES
+   ========================================================= */
+
+/*
+ * 기물의 기본 활동성을 계산한다.
+ *
+ * activityScore와 qualityScore를 분리한다.
+ *
+ * activityScore
+ *   → 현재 얼마나 움직일 수 있는가
+ *
+ * qualityScore
+ *   → 그 움직임이 실제로 얼마나 유용한가
+ *
+ * 둘을 같은 값으로 취급하지 않는다.
+ */
+
+function getPieceActivityData(
+  chess,
+  square,
+  color
+) {
+  const piece =
+    getBoardPiece(chess, square);
+
+  if (
+    !piece ||
+    piece.color !== color ||
+    !["n", "b"].includes(
+      piece.type
+    )
+  ) {
+    return null;
+  }
+
+  const moves =
+    getLegalMovesForPiece(
+      chess,
+      square,
+      color
+    );
+
+  const safeMoves =
+    moves.filter(move =>
+      isDestinationSafe(
+        chess,
+        move,
+        color
+      )
+    );
+
+  const centralMoves =
+    moves.filter(move =>
+      EXTENDED_CENTER.has(
+        move.to
+      )
+    );
+
+  const safeCentralMoves =
+    safeMoves.filter(move =>
+      EXTENDED_CENTER.has(
+        move.to
+      )
+    );
+
+  const captures =
+    moves.filter(
+      move => move.captured
+    );
+
+  const safeCaptures =
+    safeMoves.filter(
+      move => move.captured
+    );
+
+  const mobilityScore =
+    clamp(
+      moves.length / 8
+    );
+
+  const safeMobilityScore =
+    clamp(
+      safeMoves.length / 6
+    );
+
+  const centralityScore =
+    clamp(
+      centralMoves.length / 4
+    );
+
+  const safeCentralityScore =
+    clamp(
+      safeCentralMoves.length / 3
+    );
+
+  const captureAccessScore =
+    clamp(
+      captures.length / 3
+    );
+
+  const safeCaptureAccessScore =
+    clamp(
+      safeCaptures.length / 2
+    );
+
+  const activityScore =
+    clamp(
+      mobilityScore * 0.30 +
+      safeMobilityScore * 0.30 +
+      centralityScore * 0.15 +
+      safeCentralityScore * 0.15 +
+      captureAccessScore * 0.05 +
+      safeCaptureAccessScore * 0.05
+    );
+
+  return {
+    square,
+    color,
+    type: piece.type,
+
+    legalMoves: moves,
+    safeMoves,
+
+    mobility: moves.length,
+    safeMobility: safeMoves.length,
+
+    centralMoves: centralMoves.length,
+    safeCentralMoves:
+      safeCentralMoves.length,
+
+    captures: captures.length,
+    safeCaptures:
+      safeCaptures.length,
+
+    mobilityScore,
+    safeMobilityScore,
+    centralityScore,
+    safeCentralityScore,
+    captureAccessScore,
+    safeCaptureAccessScore,
+
+    activityScore
+  };
+}
+
+
+/* ---------------------------------------------------------
+   KNIGHT
+   --------------------------------------------------------- */
+
+function isKnightOutpost(
+  chess,
+  square,
+  color
+) {
+  const coords =
+    squareToCoords(square);
+
+  if (!coords) {
+    return {
+      detected: false,
+      durable: false,
+      enemyPawnChallenge: false,
+      defenders: [],
+      explanation: ""
+    };
+  }
 
   /*
-     직선 / 대각선 기물
-  */
+   * 기본 조건:
+   * - 상대 폰에게 공격받지 않는 칸
+   * - 자신의 진영보다 상대 진영 쪽에 위치
+   *
+   * 단순히 중앙에 있다는 이유만으로
+   * outpost라고 판정하지 않는다.
+   */
+
+  const enemy =
+    oppositeColor(color);
+
+  const rank =
+    coords.rank + 1;
+
+  const advancedEnough =
+    color === "w"
+      ? rank >= 5
+      : rank <= 4;
+
+  if (!advancedEnough) {
+    return {
+      detected: false,
+      durable: false,
+      enemyPawnChallenge: false,
+      defenders:
+        getAttackersOfSquare(
+          chess,
+          square,
+          color
+        ),
+      explanation:
+        "상대 진영에 충분히 전진한 칸이 아닙니다."
+    };
+  }
+
+  const enemyPawnDefenders =
+    getPawnDefenders(
+      chess,
+      square,
+      enemy
+    );
+
+  /*
+   * getPawnDefenders는 해당 칸을
+   * 공격할 수 있는 상대 폰을 찾는다.
+   */
+  const enemyPawnChallenge =
+    enemyPawnDefenders.length > 0;
+
+  const defenders =
+    getAttackersOfSquare(
+      chess,
+      square,
+      color
+    );
+
+  const friendlyPawnDefenders =
+    getPawnDefenders(
+      chess,
+      square,
+      color
+    );
+
+  const detected =
+    !enemyPawnChallenge;
+
+  const durable =
+    detected &&
+    (
+      defenders.length >= 1 ||
+      friendlyPawnDefenders.length >= 1
+    );
+
+  let explanation =
+    "나이트가 안정적으로 자리 잡을 수 있는지 확인합니다.";
+
+  if (detected && durable) {
+    explanation =
+      "상대 폰으로 쫓기기 어렵고 방어도 가능한 나이트 거점 후보입니다.";
+  } else if (detected) {
+    explanation =
+      "상대 폰에게 직접 쫓기지는 않지만 방어 안정성은 더 확인해야 합니다.";
+  } else {
+    explanation =
+      "상대 폰으로 거점을 직접 도전받을 수 있습니다.";
+  }
+
+  return {
+    detected,
+    durable,
+    enemyPawnChallenge,
+    defenders,
+    friendlyPawnDefenders,
+    explanation
+  };
+}
+
+
+function analyzeKnight(
+  chess,
+  square,
+  color
+) {
+  const activity =
+    getPieceActivityData(
+      chess,
+      square,
+      color
+    );
+
+  if (!activity) {
+    return null;
+  }
+
+  const outpost =
+    isKnightOutpost(
+      chess,
+      square,
+      color
+    );
+
+  const enemy =
+    oppositeColor(color);
+
+  const enemyTargets =
+    [];
+
+  for (
+    const move of activity.legalMoves
+  ) {
+    if (!move.to) continue;
+
+    const target =
+      getBoardPiece(
+        chess,
+        move.to
+      );
+
+    if (
+      target &&
+      target.color === enemy
+    ) {
+      enemyTargets.push({
+        square: move.to,
+        type: target.type,
+        value:
+          PIECE_VALUES[target.type]
+      });
+    }
+  }
+
+  const targetAccessScore =
+    clamp(
+      enemyTargets.length / 3
+    );
+
+  const outpostScore =
+    outpost.detected
+      ? (
+          outpost.durable
+            ? 1
+            : 0.72
+        )
+      : 0;
+
+  /*
+   * 나이트는 중앙성만으로 평가하지 않는다.
+   * 실제 이동 가능성과 안정성,
+   * 적 기물/폰에 대한 접근을 함께 본다.
+   */
+  const qualityScore =
+    clamp(
+      activity.safeMobilityScore * 0.25 +
+      activity.safeCentralityScore * 0.15 +
+      activity.safeCaptureAccessScore * 0.15 +
+      targetAccessScore * 0.20 +
+      outpostScore * 0.25
+    );
+
+  const practicalScore =
+    clamp(
+      qualityScore * 0.65 +
+      activity.activityScore * 0.35
+    );
+
+  return {
+    square,
+    color,
+    type: "n",
+
+    activityScore:
+      activity.activityScore,
+
+    qualityScore,
+    practicalScore,
+
+    mobility:
+      activity.mobility,
+
+    safeMobility:
+      activity.safeMobility,
+
+    centralMoves:
+      activity.centralMoves,
+
+    safeCentralMoves:
+      activity.safeCentralMoves,
+
+    targetAccess:
+      enemyTargets,
+
+    targetAccessScore,
+
+    outpost,
+
+    evidence: {
+      mobility:
+        activity.mobility,
+      safeMobility:
+        activity.safeMobility,
+      centralMoves:
+        activity.centralMoves,
+      targetAccess:
+        enemyTargets.length,
+      outpost:
+        outpost.detected,
+      durableOutpost:
+        outpost.durable
+    }
+  };
+}
+
+
+/* ---------------------------------------------------------
+   BISHOP
+   --------------------------------------------------------- */
+
+function getBishopDiagonalData(
+  chess,
+  square,
+  color
+) {
+  const coords =
+    squareToCoords(square);
+
+  if (!coords) {
+    return {
+      totalRaySquares: 0,
+      openRaySquares: 0,
+      usefulRaySquares: 0,
+      blockedDirections: 0,
+      longDiagonalAccess: 0
+    };
+  }
 
   const directions = [
-
-    {
-      df: 1,
-      dr: 0,
-      types: ["r", "q"]
-    },
-
-    {
-      df: -1,
-      dr: 0,
-      types: ["r", "q"]
-    },
-
-    {
-      df: 0,
-      dr: 1,
-      types: ["r", "q"]
-    },
-
-    {
-      df: 0,
-      dr: -1,
-      types: ["r", "q"]
-    },
-
-    {
-      df: 1,
-      dr: 1,
-      types: ["b", "q"]
-    },
-
-    {
-      df: 1,
-      dr: -1,
-      types: ["b", "q"]
-    },
-
-    {
-      df: -1,
-      dr: 1,
-      types: ["b", "q"]
-    },
-
-    {
-      df: -1,
-      dr: -1,
-      types: ["b", "q"]
-    }
-
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1]
   ];
 
+  let totalRaySquares = 0;
+  let openRaySquares = 0;
+  let usefulRaySquares = 0;
+  let blockedDirections = 0;
+  let longDiagonalAccess = 0;
 
-  for (const direction of directions) {
-
+  for (
+    const [df, dr] of directions
+  ) {
     let file =
-      target.file +
-      direction.df;
-
+      coords.file + df;
 
     let rank =
-      target.rank +
-      direction.dr;
+      coords.rank + dr;
 
+    let directionLength = 0;
+    let directionOpen = true;
 
     while (
       file >= 0 &&
@@ -771,5412 +1422,3564 @@ function isSquareAttackedBy(
       rank >= 0 &&
       rank <= 7
     ) {
+      directionLength++;
 
-      const square =
+      const target =
         coordsToSquare(
           file,
           rank
         );
 
+      if (!target) break;
 
-      const piece =
+      const targetPiece =
         getBoardPiece(
-          board,
-          square
+          chess,
+          target
         );
 
+      totalRaySquares++;
 
-      if (piece) {
+      if (!targetPiece) {
+        openRaySquares++;
 
         if (
-          piece.color === attackerColor &&
-          direction.types.includes(
-            piece.type
+          CENTER_SQUARES.has(
+            target
+          ) ||
+          EXTENDED_CENTER.has(
+            target
           )
         ) {
+          usefulRaySquares++;
+        }
+      } else {
+        directionOpen = false;
 
-          return true;
-
+        if (
+          targetPiece.color !== color
+        ) {
+          usefulRaySquares++;
         }
 
-
         break;
-
       }
 
-
-      file +=
-        direction.df;
-
-
-      rank +=
-        direction.dr;
-
+      file += df;
+      rank += dr;
     }
 
-  }
-
-
-  return false;
-}
-
-
-/* =========================================================
-   특정 칸의 공격자 목록
-========================================================= */
-
-function findAttackersOfSquare(
-  board,
-  targetSquare,
-  attackerColor
-) {
-
-  const attackers = [];
-
-
-  for (let rank = 1; rank <= 8; rank++) {
-
-    for (let file = 0; file < 8; file++) {
-
-      const square =
-        coordsToSquare(
-          file,
-          rank - 1
-        );
-
-
-      const piece =
-        getBoardPiece(
-          board,
-          square
-        );
-
-
-      if (
-        !piece ||
-        piece.color !== attackerColor
-      ) {
-
-        continue;
-
-      }
-
-
-      if (
-        isPieceAttackingSquare(
-          board,
-          square,
-          targetSquare,
-          attackerColor
-        )
-      ) {
-
-        attackers.push({
-          square,
-          type: piece.type
-        });
-
-      }
-
+    if (!directionOpen) {
+      blockedDirections++;
     }
 
+    if (directionLength >= 4) {
+      longDiagonalAccess++;
+    }
   }
 
-
-  return attackers;
+  return {
+    totalRaySquares,
+    openRaySquares,
+    usefulRaySquares,
+    blockedDirections,
+    longDiagonalAccess
+  };
 }
 
 
-/* =========================================================
-   중앙성
-========================================================= */
-
-function calculateCentrality(square) {
-
-  const {
-    file,
-    rank
-  } = squareToCoords(square);
-
-
-  const distance =
-    Math.abs(file - 3.5) +
-    Math.abs(rank - 3.5);
-
-
-  const maximumDistance = 7;
-
-
-  return Math.max(
-    0,
-    1 - (
-      distance /
-      maximumDistance
-    )
-  );
-
-}
-
-
-/* =========================================================
-   나이트 아웃포스트 후보
-========================================================= */
-
-function isKnightOutpost(
+function analyzeBishop(
   chess,
   square,
   color
 ) {
-
-  const {
-    file,
-    rank
-  } = squareToCoords(square);
-
-
-  /*
-     상대 진영 쪽에 있는 칸이어야 한다.
-  */
-
-  if (
-    color === "w" &&
-    rank < 4
-  ) {
-
-    return false;
-
-  }
-
-
-  if (
-    color === "b" &&
-    rank > 3
-  ) {
-
-    return false;
-
-  }
-
-
-  /*
-     가장자리 파일은 일반적인
-     아웃포스트로 보기 어렵다.
-  */
-
-  if (
-    file === 0 ||
-    file === 7
-  ) {
-
-    return false;
-
-  }
-
-
-  const board =
-    chess.board();
-
-
-  const enemy =
-    oppositeColor(color);
-
-
-  /*
-     현재 칸이 상대 폰에게 공격받고 있다면
-     지속 가능한 아웃포스트 후보로 보지 않는다.
-  */
-
-  const enemyPawnAttack =
-    findAttackersOfSquare(
-      board,
-      square,
-      enemy
-    ).some(
-      (attacker) =>
-        attacker.type === "p"
-    );
-
-
-  if (enemyPawnAttack) {
-
-    return false;
-
-  }
-
-
-  return true;
-}
-
-
-/* =========================================================
-   나이트 아웃포스트 지속 가능성
-========================================================= */
-
-function evaluateKnightOutpostDurability(
-  chess,
-  piece
-) {
-
-  if (
-    piece.type !== "n" ||
-    !piece.outpostCandidate
-  ) {
-
-    return {
-
-      score: 0,
-
-      reasons: []
-
-    };
-
-  }
-
-
-  const board =
-    chess.board();
-
-
-  const enemy =
-    oppositeColor(
-      piece.color
-    );
-
-
-  const attackers =
-    findAttackersOfSquare(
-      board,
-      piece.square,
-      enemy
-    );
-
-
-  const enemyPawnAttackers =
-    attackers.filter(
-      (item) =>
-        item.type === "p"
-    );
-
-
-  const enemyMinorAttackers =
-    attackers.filter(
-      (item) =>
-        item.type === "n" ||
-        item.type === "b"
-    );
-
-
-  let score = 0;
-
-  const reasons = [];
-
-
-  if (
-    enemyPawnAttackers.length === 0
-  ) {
-
-    score += 8;
-
-    reasons.push(
-      "현재 위치를 상대 폰으로 바로 쫓아내기 어려움"
-    );
-
-  } else {
-
-    score -= 8;
-
-    reasons.push(
-      "상대 폰으로 쫓아낼 가능성이 있음"
-    );
-
-  }
-
-
-  if (
-    enemyMinorAttackers.length === 0
-  ) {
-
-    score += 3;
-
-    reasons.push(
-      "상대 마이너 피스의 직접적인 압박이 제한적임"
-    );
-
-  }
-
-
-  return {
-
-    score,
-
-    reasons
-
-  };
-
-}
-
-
-/* =========================================================
-   비숍 대각선 활동성
-========================================================= */
-
-function analyzeBishopDiagonals(
-  chess,
-  square
-) {
-
-  const board =
-    chess.board();
-
-
-  const piece =
-    getBoardPiece(
-      board,
-      square
-    );
-
-
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-
-    return {
-
-      reachableSquares: 0,
-
-      openDiagonals: 0,
-
-      blockedDiagonals: 0,
-
-      longDiagonalAccess: 0,
-
-      usefulTargets: []
-
-    };
-
-  }
-
-
-  const {
-    file,
-    rank
-  } = squareToCoords(square);
-
-
-  const directions = [
-
-    [1, 1],
-    [1, -1],
-    [-1, 1],
-    [-1, -1]
-
-  ];
-
-
-  let reachableSquares = 0;
-
-  let openDiagonals = 0;
-
-  let blockedDiagonals = 0;
-
-  let longDiagonalAccess = 0;
-
-  const usefulTargets = [];
-
-
-  for (
-    const [df, dr] of directions
-  ) {
-
-    let currentFile =
-      file + df;
-
-
-    let currentRank =
-      rank + dr;
-
-
-    let distance = 0;
-
-    let encounteredBlock =
-      false;
-
-
-    while (
-      currentFile >= 0 &&
-      currentFile <= 7 &&
-      currentRank >= 0 &&
-      currentRank <= 7
-    ) {
-
-      const currentSquare =
-        coordsToSquare(
-          currentFile,
-          currentRank
-        );
-
-
-      const targetPiece =
-        getBoardPiece(
-          board,
-          currentSquare
-        );
-
-
-      if (targetPiece) {
-
-        if (
-          targetPiece.color !==
-          piece.color
-        ) {
-
-          reachableSquares += 1;
-
-
-          usefulTargets.push({
-
-            square:
-              currentSquare,
-
-            type:
-              targetPiece.type
-
-          });
-
-        }
-
-
-        encounteredBlock = true;
-
-        break;
-
-      }
-
-
-      reachableSquares += 1;
-
-      distance += 1;
-
-
-      currentFile += df;
-
-      currentRank += dr;
-
-    }
-
-
-    if (encounteredBlock) {
-
-      blockedDiagonals += 1;
-
-    } else {
-
-      openDiagonals += 1;
-
-    }
-
-
-    if (distance >= 3) {
-
-      longDiagonalAccess += 1;
-
-    }
-
-  }
-
-
-  return {
-
-    reachableSquares,
-
-    openDiagonals,
-
-    blockedDiagonals,
-
-    longDiagonalAccess,
-
-    usefulTargets
-
-  };
-
-}
-
-
-/* =========================================================
-   마이너 피스 한 개 분석
-========================================================= */
-
-function analyzeMinorPiece(
-  chess,
-  pieceData
-) {
-
-  const color =
-    pieceData.color;
-
-
-  const type =
-    pieceData.type;
-
-
-  const square =
-    pieceData.square;
-
-
-  const legalMoves =
-    getLegalMovesForPiece(
+  const activity =
+    getPieceActivityData(
       chess,
       square,
       color
     );
 
-
-  let safeMoves = 0;
-
-  let captureMoves = 0;
-
-  let centralMoves = 0;
-
-
-  const destinationSquares = [];
-
-
-  const captureTargets = [];
-
-
-  const safeDestinationSquares = [];
-
-
-  for (
-    const move of legalMoves
-  ) {
-
-    destinationSquares.push(
-      move.to
-    );
-
-
-    if (move.captured) {
-
-      captureMoves += 1;
-
-
-      captureTargets.push({
-
-        square:
-          move.to,
-
-        type:
-          move.captured
-
-      });
-
-    }
-
-
-    const destinationCentrality =
-      calculateCentrality(
-        move.to
-      );
-
-
-    if (
-      destinationCentrality >= 0.65
-    ) {
-
-      centralMoves += 1;
-
-    }
-
-
-    try {
-
-      const testChess =
-        createChessForColor(
-          chess,
-          color
-        );
-
-
-      testChess.move({
-
-        from: move.from,
-
-        to: move.to,
-
-        promotion: move.promotion
-
-      });
-
-
-      const safe =
-        !isSquareAttackedBy(
-
-          testChess.board(),
-
-          move.to,
-
-          oppositeColor(color)
-
-        );
-
-
-      if (safe) {
-
-        safeMoves += 1;
-
-        safeDestinationSquares.push(
-          move.to
-        );
-
-      }
-
-    } catch (error) {
-
-      /*
-         안전성 계산 실패는
-         전체 분석을 중단시키지 않는다.
-      */
-
-    }
-
+  if (!activity) {
+    return null;
   }
 
-
-  const legalMobility =
-    legalMoves.length;
-
-
-  const mobilityRatio =
-    legalMobility > 0
-      ? safeMoves / legalMobility
-      : 0;
-
-
-  const centrality =
-    calculateCentrality(
-      square
-    );
-
-
-  let outpostCandidate =
-    false;
-
-
-  if (type === "n") {
-
-    outpostCandidate =
-      isKnightOutpost(
-        chess,
-        square,
-        color
-      );
-
-  }
-
-
-  let bishopInfo = null;
-
-
-  if (type === "b") {
-
-    bishopInfo =
-      analyzeBishopDiagonals(
-        chess,
-        square
-      );
-
-  }
-
-
-  /*
-     현재 위치에서 직접 공격하고 있는
-     상대 기물 목록.
-  */
-
-  const board =
-    chess.board();
-
-
-  const enemy =
-    oppositeColor(color);
-
-
-  const directAttackers =
-    findAttackersOfSquare(
-      board,
-      square,
-      enemy
-    );
-
-
-  const defendedBy =
-    findAttackersOfSquare(
-      board,
+  const diagonal =
+    getBishopDiagonalData(
+      chess,
       square,
       color
     );
 
+  const enemy =
+    oppositeColor(color);
 
-  /*
-     활동성 참고값
+  const enemyTargets =
+    [];
 
-     이것은 "기물이 얼마나 움직일 수 있는가"만
-     보여주는 별도의 지표다.
-  */
+  for (
+    const move of activity.legalMoves
+  ) {
+    if (!move.to) continue;
 
-  let activityScore = 0;
+    const target =
+      getBoardPiece(
+        chess,
+        move.to
+      );
 
-
-  activityScore +=
-    Math.min(
-      legalMobility,
-      8
-    ) * 4;
-
-
-  activityScore +=
-    Math.min(
-      safeMoves,
-      8
-    ) * 4;
-
-
-  activityScore +=
-    centrality * 15;
-
-
-  activityScore +=
-    Math.min(
-      captureMoves,
-      3
-    ) * 5;
-
-
-  if (outpostCandidate) {
-
-    activityScore += 10;
-
+    if (
+      target &&
+      target.color === enemy
+    ) {
+      enemyTargets.push({
+        square: move.to,
+        type: target.type,
+        value:
+          PIECE_VALUES[target.type]
+      });
+    }
   }
 
-
-  if (bishopInfo) {
-
-    activityScore +=
-      bishopInfo.longDiagonalAccess * 3;
-
-    activityScore +=
-      bishopInfo.openDiagonals * 2;
-
-  }
-
-
-  activityScore =
-    Math.min(
-      100,
-      Math.round(
-        activityScore
-      )
+  const diagonalScore =
+    clamp(
+      diagonal.openRaySquares / 10
     );
 
+  const usefulDiagonalScore =
+    clamp(
+      diagonal.usefulRaySquares / 5
+    );
+
+  const longDiagonalScore =
+    clamp(
+      diagonal.longDiagonalAccess / 2
+    );
+
+  const targetAccessScore =
+    clamp(
+      enemyTargets.length / 3
+    );
+
+  /*
+   * 비숍은 "비숍이니까 좋은 기물"로 평가하지 않는다.
+   *
+   * 실제로 열려 있는 대각선,
+   * 유용한 대각선,
+   * 공격 대상 접근,
+   * 안전한 활동성을 함께 본다.
+   */
+  const qualityScore =
+    clamp(
+      activity.safeMobilityScore * 0.20 +
+      diagonalScore * 0.20 +
+      usefulDiagonalScore * 0.20 +
+      longDiagonalScore * 0.10 +
+      targetAccessScore * 0.20 +
+      activity.safeCentralityScore * 0.10
+    );
+
+  const practicalScore =
+    clamp(
+      qualityScore * 0.65 +
+      activity.activityScore * 0.35
+    );
 
   return {
-
-    color,
-
-    side:
-      colorName(color),
-
-    type,
-
-    name:
-      pieceName(type),
-
     square,
+    color,
+    type: "b",
 
-    legalMobility,
+    activityScore:
+      activity.activityScore,
+
+    qualityScore,
+    practicalScore,
+
+    mobility:
+      activity.mobility,
 
     safeMobility:
-      safeMoves,
+      activity.safeMobility,
 
-    mobilityRatio,
+    centralMoves:
+      activity.centralMoves,
 
-    captureMoves,
+    safeCentralMoves:
+      activity.safeCentralMoves,
 
-    captureTargets,
+    targetAccess:
+      enemyTargets,
 
-    centralMoves,
+    targetAccessScore,
 
-    centrality,
+    diagonal,
 
-    outpostCandidate,
-
-    bishopInfo,
-
-    destinationSquares,
-
-    safeDestinationSquares,
-
-    directAttackers,
-
-    defendedBy,
-
-    activityScore
-
+    evidence: {
+      mobility:
+        activity.mobility,
+      safeMobility:
+        activity.safeMobility,
+      openRaySquares:
+        diagonal.openRaySquares,
+      usefulRaySquares:
+        diagonal.usefulRaySquares,
+      longDiagonalAccess:
+        diagonal.longDiagonalAccess,
+      targetAccess:
+        enemyTargets.length
+    }
   };
-
-}
-
-
+    }
 /* =========================================================
-   마이너 피스의 폰 구조 적합성
-========================================================= */
-
-function evaluatePawnFitForMinorPiece(
-  piece,
-  pawnStructure
-) {
-
-  if (!pawnStructure) {
-
-    return {
-
-      score: 0,
-
-      reasons: []
-
-    };
-
-  }
-
-
-  const sideData =
-    piece.color === "w"
-      ? pawnStructure.white
-      : pawnStructure.black;
-
-
-  const enemyData =
-    piece.color === "w"
-      ? pawnStructure.black
-      : pawnStructure.white;
-
-
-  const reasons = [];
-
-  let score = 0;
-
-
-  if (piece.type === "b") {
-
-    const bishopInfo =
-      piece.bishopInfo;
-
-
-    if (
-      bishopInfo &&
-      bishopInfo.blockedDiagonals === 0
-    ) {
-
-      score += 7;
-
-      reasons.push(
-        "자기 폰에 의해 막힌 대각선이 적음"
-      );
-
-    } else if (
-      bishopInfo &&
-      bishopInfo.blockedDiagonals >= 2
-    ) {
-
-      score -= 7;
-
-      reasons.push(
-        "자기 폰에 의해 막힌 대각선이 많음"
-      );
-
-    }
-
-
-    if (
-      bishopInfo &&
-      bishopInfo.longDiagonalAccess >= 1
-    ) {
-
-      score += 4;
-
-      reasons.push(
-        "장거리 대각선 접근 가능"
-      );
-
-    }
-
-
-    if (
-      bishopInfo &&
-      bishopInfo.usefulTargets &&
-      bishopInfo.usefulTargets.length
-    ) {
-
-      score += Math.min(
-        6,
-        bishopInfo.usefulTargets.length * 3
-      );
-
-      reasons.push(
-        "대각선 끝에서 상대 기물이나 폰에 실제 접근 가능"
-      );
-
-    }
-
-
-    /*
-       폰 구조에 존재하는 브레이크가
-       비숍의 선을 열 가능성을 기록한다.
-
-       이것은 즉시 좋은 비숍이라는 뜻이 아니라
-       "앞으로 개선될 가능성"이다.
-    */
-
-    if (
-      sideData.breaks &&
-      sideData.breaks.length
-    ) {
-
-      score += 2;
-
-      reasons.push(
-        "폰 브레이크를 통해 대각선이 더 열릴 가능성이 있음"
-      );
-
-    }
-
-
-    void enemyData;
-
-  }
-
-
-  if (piece.type === "n") {
-
-    if (
-      piece.outpostCandidate
-    ) {
-
-      score += 7;
-
-      reasons.push(
-        "현재 칸에서 아웃포스트 후보 성격이 있음"
-      );
-
-    }
-
-
-    if (
-      piece.centralMoves >= 2
-    ) {
-
-      score += 4;
-
-      reasons.push(
-        "여러 중앙 접근 경로를 가짐"
-      );
-
-    }
-
-
-    /*
-       자기 폰 구조에 공격받고 있는
-       상대 폰이 존재하는 경우에는
-       실제 계획과 연결될 가능성을 조금 높인다.
-
-       단, 공격 가능 = 약점이라고 판단하지 않는다.
-    */
-
-    const attackableTargets =
-      enemyData.targets || [];
-
-
-    if (
-      attackableTargets.length
-    ) {
-
-      score += Math.min(
-        6,
-        attackableTargets.length * 2
-      );
-
-      reasons.push(
-        "상대 폰 구조에서 실제 접근 가능한 대상이 관측됨"
-      );
-
-    }
-
-  }
-
-
-  return {
-
-    score,
-
-    reasons
-
-  };
-
-}
-
-
-/* =========================================================
-   상대 기물/폰 대상의 실질적 가치
-========================================================= */
-
-function evaluateTargetAccess(
+   MINOR PIECE COMPARISON
+   ========================================================= */
+
+/*
+ * 한쪽의 나이트/비숍 정보를 모은다.
+ */
+function analyzeMinorPiecesForSide(
   chess,
-  piece
-) {
-
-  const board =
-    chess.board();
-
-
-  const enemy =
-    oppositeColor(
-      piece.color
-    );
-
-
-  const targets = [];
-
-
-  /*
-     현재 기물의 합법적인 잡기 가능 수를 조사한다.
-  */
-
-  const legalMoves =
-    getLegalMovesForPiece(
-      chess,
-      piece.square,
-      piece.color
-    );
-
-
-  for (
-    const move of legalMoves
-  ) {
-
-    if (!move.captured) {
-      continue;
-    }
-
-
-    const targetPiece =
-      getBoardPiece(
-        board,
-        move.to
-      );
-
-
-    if (
-      !targetPiece ||
-      targetPiece.color !== enemy
-    ) {
-
-      continue;
-
-    }
-
-
-    const defenders =
-      findAttackersOfSquare(
-        board,
-        move.to,
-        enemy
-      );
-
-
-    /*
-       방어자가 많다고 해서
-       공격 가치가 0이 되는 것은 아니다.
-
-       여기서는 "접근 가능성"을 기록한다.
-    */
-
-    let value = 2;
-
-
-    if (
-      targetPiece.type === "q" ||
-      targetPiece.type === "r"
-    ) {
-
-      value += 3;
-
-    } else if (
-      targetPiece.type === "b" ||
-      targetPiece.type === "n"
-    ) {
-
-      value += 2;
-
-    } else if (
-      targetPiece.type === "p"
-    ) {
-
-      value += 1;
-
-    }
-
-
-    if (
-      defenders.length === 0
-    ) {
-
-      value += 3;
-
-    } else if (
-      defenders.length === 1
-    ) {
-
-      value += 1;
-
-    } else {
-
-      value -= 1;
-
-    }
-
-
-    targets.push({
-
-      square:
-        move.to,
-
-      type:
-        targetPiece.type,
-
-      defenders:
-        defenders.map(
-          (item) =>
-            item.square
-        ),
-
-      value
-
-    });
-
-  }
-
-
-  /*
-     현재 칸 자체가 상대 기물에 의해
-     공격받고 있는지도 기록한다.
-  */
-
-  const attackers =
-    findAttackersOfSquare(
-      board,
-      piece.square,
-      enemy
-    );
-
-
-  return {
-
-    targets,
-
-    attackers
-
-  };
-
-}
-
-
-/* =========================================================
-   마이너 피스 실전적 가치 평가
-=========================================================
-
-   중요:
-
-   이 값은 Stockfish 평가값이 아니다.
-
-   활동성 자체를 그대로 우세라고 판단하지 않고
-
-   1. 이동 가능성
-   2. 안전성
-   3. 중앙 접근
-   4. 실제 대상 접근
-   5. 아웃포스트 지속 가능성
-   6. 비숍 대각선 활용
-   7. 폰 구조와의 적합성
-   8. 같은 진영의 다른 기물과의 관계
-
-   를 종합한다.
-========================================================= */
-
-function evaluateMinorPieceQuality(
-  chess,
-  piece,
-  sideData,
-  pawnStructure
-) {
-
-  /*
-     실전적 가치의 기본값은
-     활동성 참고값을 그대로 복사하지 않는다.
-
-     여러 요소를 별도로 계산한다.
-  */
-
-  let score = 40;
-
-  const reasons = [];
-
-
-  /*
-     ------------------------------------------------------
-     1. 이동 가능성
-     ------------------------------------------------------
-  */
-
-  if (
-    piece.legalMobility >= 6
-  ) {
-
-    score += 8;
-
-    reasons.push(
-      "이동 가능한 칸이 많음"
-    );
-
-  } else if (
-    piece.legalMobility <= 2
-  ) {
-
-    score -= 7;
-
-    reasons.push(
-      "이동 가능한 칸이 제한적임"
-    );
-
-  } else {
-
-    score += 3;
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     2. 안전한 이동
-     ------------------------------------------------------
-  */
-
-  if (
-    piece.mobilityRatio >= 0.65
-  ) {
-
-    score += 9;
-
-    reasons.push(
-      "이동 가능 칸 중 안전한 칸의 비율이 높음"
-    );
-
-  } else if (
-    piece.mobilityRatio < 0.30
-  ) {
-
-    score -= 9;
-
-    reasons.push(
-      "안전하게 이동할 수 있는 칸이 제한적임"
-    );
-
-  } else {
-
-    score += 2;
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     3. 중앙 접근
-     ------------------------------------------------------
-  */
-
-  if (
-    piece.centralMoves >= 2
-  ) {
-
-    score += 6;
-
-    reasons.push(
-      "중앙으로 접근할 수 있는 이동이 여러 개 있음"
-    );
-
-  } else if (
-    piece.centralMoves === 0
-  ) {
-
-    score -= 2;
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     4. 실제 공격 대상
-     ------------------------------------------------------
-  */
-
-  const targetAccess =
-    evaluateTargetAccess(
-      chess,
-      piece
-    );
-
-
-  piece.targetAccess =
-    targetAccess;
-
-
-  if (
-    targetAccess.targets.length
-  ) {
-
-    const totalTargetValue =
-      targetAccess.targets.reduce(
-        (sum, target) =>
-          sum + target.value,
-        0
-      );
-
-
-    score += Math.min(
-      12,
-      totalTargetValue
-    );
-
-
-    reasons.push(
-      `현재 위치에서 실제로 접근 가능한 상대 대상 ${targetAccess.targets.length}개가 있음`
-    );
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     5. 현재 기물의 안전성
-     ------------------------------------------------------
-  */
-
-  if (
-    targetAccess.attackers.length === 0
-  ) {
-
-    score += 5;
-
-    reasons.push(
-      "현재 기물에 대한 직접적인 상대 압박이 없음"
-    );
-
-  } else {
-
-    score -= Math.min(
-      8,
-      targetAccess.attackers.length * 3
-    );
-
-    reasons.push(
-      "현재 기물이 상대 기물의 직접적인 압박을 받고 있음"
-    );
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     6. 나이트
-     ------------------------------------------------------
-  */
-
-  if (
-    piece.type === "n"
-  ) {
-
-    if (
-      piece.outpostCandidate
-    ) {
-
-      score += 8;
-
-      reasons.push(
-        "현재 위치에 아웃포스트 후보 성격이 있음"
-      );
-
-
-      const durability =
-        evaluateKnightOutpostDurability(
-          chess,
-          piece
-        );
-
-
-      piece.outpostDurability =
-        durability;
-
-
-      score +=
-        durability.score;
-
-
-      for (
-        const reason of durability.reasons
-      ) {
-
-        reasons.push(
-          reason
-        );
-
-      }
-
-    }
-
-
-    if (
-      piece.captureMoves >= 2
-    ) {
-
-      score += 4;
-
-      reasons.push(
-        "현재 위치에서 여러 상대 기물에 접근 가능"
-      );
-
-    }
-
-
-    if (
-      piece.safeMobility >= 3
-    ) {
-
-      score += 3;
-
-    }
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     7. 비숍
-     ------------------------------------------------------
-  */
-
-  if (
-    piece.type === "b" &&
-    piece.bishopInfo
-  ) {
-
-    if (
-      piece.bishopInfo.longDiagonalAccess >= 1
-    ) {
-
-      score += 5;
-
-      reasons.push(
-        "장거리 대각선에 접근할 수 있음"
-      );
-
-    }
-
-
-    if (
-      piece.bishopInfo.blockedDiagonals >= 2
-    ) {
-
-      score -= 5;
-
-      reasons.push(
-        "현재 대각선 일부가 막혀 있음"
-      );
-
-    }
-
-
-    if (
-      piece.bishopInfo.usefulTargets &&
-      piece.bishopInfo.usefulTargets.length
-    ) {
-
-      score += Math.min(
-        7,
-        piece.bishopInfo.usefulTargets.length * 3
-      );
-
-      reasons.push(
-        "대각선 끝에서 실제 상대 대상을 바라보고 있음"
-      );
-
-    }
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     8. 폰 구조와의 관계
-     ------------------------------------------------------
-  */
-
-  const pawnFit =
-    evaluatePawnFitForMinorPiece(
-      piece,
-      pawnStructure
-    );
-
-
-  score +=
-    pawnFit.score;
-
-
-  for (
-    const reason of pawnFit.reasons
-  ) {
-
-    if (
-      !reasons.includes(reason)
-    ) {
-
-      reasons.push(reason);
-
-    }
-
-  }
-
-
-  /*
-     ------------------------------------------------------
-     9. 같은 진영 마이너 피스와의 관계
-     ------------------------------------------------------
-  */
-
-  const ownMinorPieces =
-    sideData.pieces.filter(
-      (item) =>
-        (
-          item.type === "b" ||
-          item.type === "n"
-        ) &&
-        item.square !== piece.square
-    );
-
-
-  if (
-    ownMinorPieces.length === 0
-  ) {
-
-    /*
-       마이너 피스가 하나뿐인 경우
-       평균 계산에서 특별히 유리/불리하게
-       만들지 않는다.
-    */
-
-  }
-
-
-  /*
-     최종 범위.
-
-     이것은 엔진 점수가 아니다.
-  */
-
-  score =
-    Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(score)
-      )
-    );
-
-
-  /*
-     같은 이유가 반복되는 것을 방지한다.
-  */
-
-  const uniqueReasons =
-    [...new Set(reasons)];
-
-
-  return {
-
-    score,
-
-    reasons:
-      uniqueReasons.slice(
-        0,
-        6
-      )
-
-  };
-
-}
-
-
-/* =========================================================
-   진영 전체의 마이너 피스 관계 평가
-========================================================= */
-
-function evaluateMinorSideQuality(
-  pieces,
-  sideData,
-  pawnStructure,
   color
 ) {
+  const pieces = [];
 
-  if (!pieces.length) {
+  for (
+    let rank = 1;
+    rank <= 8;
+    rank++
+  ) {
+    for (
+      let fileIndex = 0;
+      fileIndex < 8;
+      fileIndex++
+    ) {
+      const square =
+        String.fromCharCode(
+          "a".charCodeAt(0) +
+            fileIndex
+        ) +
+        String(rank);
 
-    return {
+      const piece =
+        getBoardPiece(
+          chess,
+          square
+        );
 
-      average: null,
+      if (
+        !piece ||
+        piece.color !== color ||
+        !["n", "b"].includes(
+          piece.type
+        )
+      ) {
+        continue;
+      }
 
-      strongest: null,
+      let analysis = null;
 
-      weakest: null,
+      if (piece.type === "n") {
+        analysis =
+          analyzeKnight(
+            chess,
+            square,
+            color
+          );
+      } else {
+        analysis =
+          analyzeBishop(
+            chess,
+            square,
+            color
+          );
+      }
 
-      bishopPair: false,
-
-      score: null,
-
-      reasons: []
-
-    };
-
+      if (analysis) {
+        pieces.push(analysis);
+      }
+    }
   }
-
-
-  const bishops =
-    pieces.filter(
-      (piece) =>
-        piece.type === "b"
-    );
-
 
   const knights =
     pieces.filter(
-      (piece) =>
+      piece =>
         piece.type === "n"
     );
 
+  const bishops =
+    pieces.filter(
+      piece =>
+        piece.type === "b"
+    );
 
+  /*
+   * 비숍 페어는 그 자체로 "우세 확정"이 아니다.
+   *
+   * 열린 포지션에서 활용 가능성이 있는 경우
+   * 추가적인 긍정 신호로만 사용한다.
+   */
   const bishopPair =
     bishops.length >= 2;
 
-
-  /*
-     개별 기물 평가
-  */
-
-  for (
-    const piece of pieces
-  ) {
-
-    const quality =
-      evaluateMinorPieceQuality(
-        color === "w"
-          ? piece.chess
-          : piece.chess,
-        piece,
-        sideData,
-        pawnStructure
-      );
-
-
-    piece.qualityScore =
-      quality.score;
-
-
-    piece.qualityReasons =
-      quality.reasons;
-
-  }
-
-
-  const sorted =
-    [...pieces].sort(
-      (a, b) =>
-        b.qualityScore -
-        a.qualityScore
+  const averageActivity =
+    weightedAverage(
+      pieces,
+      "activityScore"
     );
 
+  const averageQuality =
+    weightedAverage(
+      pieces,
+      "qualityScore"
+    );
+
+  const averagePractical =
+    weightedAverage(
+      pieces,
+      "practicalScore"
+    );
 
   const strongest =
-    sorted[0] || null;
-
+    pieces.length
+      ? [...pieces].sort(
+          (a, b) =>
+            b.qualityScore -
+            a.qualityScore
+        )[0]
+      : null;
 
   const weakest =
-    sorted[
-      sorted.length - 1
-    ] || null;
-
-
-  const average =
-    Math.round(
-      pieces.reduce(
-        (sum, piece) =>
-          sum + piece.qualityScore,
-        0
-      ) /
-      pieces.length
-    );
-
-
-  /*
-     비숍 페어는 "자동 우세"가 아니다.
-
-     현재 단계에서는 작은 보조값만 준다.
-  */
-
-  let sideScore =
-    average;
-
-
-  const reasons = [];
-
-
-  if (
-    bishopPair
-  ) {
-
-    sideScore += 3;
-
-    reasons.push(
-      "비숍 페어를 보유하고 있음"
-    );
-
-  }
-
-
-  if (
-    strongest
-  ) {
-
-    reasons.push(
-      `가장 실전적 가치가 높은 후보는 ${strongest.name} ${strongest.square}`
-    );
-
-  }
-
-
-  if (
-    weakest &&
-    weakest !== strongest
-  ) {
-
-    reasons.push(
-      `가장 제한된 마이너 피스는 ${weakest.name} ${weakest.square}`
-    );
-
-  }
-
-
-  sideScore =
-    Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(sideScore)
-      )
-    );
-
+    pieces.length
+      ? [...pieces].sort(
+          (a, b) =>
+            a.qualityScore -
+            b.qualityScore
+        )[0]
+      : null;
 
   return {
+    color,
 
-    average,
+    pieces,
+    knights,
+    bishops,
 
-    strongest,
+    knightCount:
+      knights.length,
 
-    weakest,
+    bishopCount:
+      bishops.length,
 
     bishopPair,
 
-    score:
-      sideScore,
+    averageActivity,
+    averageQuality,
+    averagePractical,
 
-    reasons
-
+    strongest,
+    weakest
   };
-
 }
 
 
-/* =========================================================
-   마이너 피스 우세 판단
-========================================================= */
-
-function determineMinorPieceAdvantage(
-  whiteAnalysis,
-  blackAnalysis
+/*
+ * 서로 다른 종류의 기물을 단순히 평균으로 비교하면
+ * 실제 전략적 의미를 놓칠 수 있다.
+ *
+ * 예:
+ * 백 비숍 1개가 매우 강하고
+ * 백 나이트 1개가 평범한 경우
+ *
+ * 흑 나이트 2개가 모두 평범하다고 해서
+ * 평균값 하나만으로 판단하지 않는다.
+ */
+function compareMinorPieces(
+  white,
+  black
 ) {
+  const whitePieces =
+    white.pieces || [];
 
-  const whiteScore =
-    whiteAnalysis.score;
-
-
-  const blackScore =
-    blackAnalysis.score;
-
-
-  if (
-    whiteScore === null ||
-    blackScore === null
-  ) {
-
-    return {
-
-      side: null,
-
-      label:
-        "비교 불가",
-
-      difference: null,
-
-      confidence:
-        "low",
-
-      reasons: []
-
-    };
-
-  }
-
-
-  const difference =
-    whiteScore -
-    blackScore;
-
-
-  /*
-     평균 차이만으로 우세를 선언하지 않는다.
-
-     실제로는 가장 좋은 기물과
-     가장 제한된 기물의 관계도 함께 본다.
-  */
+  const blackPieces =
+    black.pieces || [];
 
   const whiteStrongest =
-    whiteAnalysis.strongest;
-
+    white.strongest;
 
   const blackStrongest =
-    blackAnalysis.strongest;
-
+    black.strongest;
 
   const whiteWeakest =
-    whiteAnalysis.weakest;
-
+    white.weakest;
 
   const blackWeakest =
-    blackAnalysis.weakest;
+    black.weakest;
 
+  const averageDifference =
+    white.averageQuality -
+    black.averageQuality;
+
+  const practicalDifference =
+    white.averagePractical -
+    black.averagePractical;
+
+  let strongestDifference = 0;
+
+  if (
+    whiteStrongest &&
+    blackWeakest
+  ) {
+    strongestDifference =
+      whiteStrongest.qualityScore -
+      blackWeakest.qualityScore;
+  }
+
+  let weakestDifference = 0;
+
+  if (
+    blackStrongest &&
+    whiteWeakest
+  ) {
+    weakestDifference =
+      blackStrongest.qualityScore -
+      whiteWeakest.qualityScore;
+  }
 
   /*
-     차이가 작으면 판단 보류.
-  */
+   * 양쪽 모두 같은 수의 기물이 있는 경우와
+   * 기물 수가 다른 경우를 구분한다.
+   */
+  const equalCount =
+    whitePieces.length ===
+    blackPieces.length;
 
+  let whiteScore =
+    averageDifference * 0.40 +
+    practicalDifference * 0.25;
+
+  let blackScore =
+    -averageDifference * 0.40 +
+    -practicalDifference * 0.25;
+
+  /*
+   * 가장 강한 기물과 상대의 가장 약한 기물 사이의
+   * 실제 활용 가능성도 반영한다.
+   */
   if (
-    Math.abs(difference) < 5
+    strongestDifference > 0
   ) {
-
-    return {
-
-      side: null,
-
-      label:
-        "뚜렷한 우세 후보 없음",
-
-      difference,
-
-      confidence:
-        "low",
-
-      reasons: [
-
-        "양쪽 마이너 피스의 실전적 가치 차이가 크지 않음"
-
-      ]
-
-    };
-
+    whiteScore +=
+      clamp(
+        strongestDifference
+      ) * 0.20;
+  } else {
+    blackScore +=
+      clamp(
+        -strongestDifference
+      ) * 0.20;
   }
 
-
-  const side =
-    difference > 0
-      ? "w"
-      : "b";
-
-
-  const own =
-    side === "w"
-      ? whiteAnalysis
-      : blackAnalysis;
-
-
-  const opponent =
-    side === "w"
-      ? blackAnalysis
-      : whiteAnalysis;
-
-
-  const ownStrongest =
-    own.strongest;
-
-
-  const opponentStrongest =
-    opponent.strongest;
-
-
-  const ownWeakest =
-    own.weakest;
-
-
-  const opponentWeakest =
-    opponent.weakest;
-
-
-  const reasons = [];
-
-
   if (
-    ownStrongest
+    weakestDifference > 0
   ) {
-
-    if (
-      ownStrongest.qualityReasons &&
-      ownStrongest.qualityReasons.length
-    ) {
-
-      reasons.push(
-        `${colorName(side)} ${ownStrongest.name} ${ownStrongest.square}: ` +
-        ownStrongest.qualityReasons[0]
-      );
-
-    }
-
+    blackScore +=
+      clamp(
+        weakestDifference
+      ) * 0.15;
+  } else {
+    whiteScore +=
+      clamp(
+        -weakestDifference
+      ) * 0.15;
   }
 
+  /*
+   * 비숍 페어는 보조적인 신호.
+   * 자동으로 큰 점수를 주지 않는다.
+   */
+  if (white.bishopPair) {
+    whiteScore += 0.05;
+  }
 
-  if (
-    opponentWeakest
-  ) {
+  if (black.bishopPair) {
+    blackScore += 0.05;
+  }
 
-    reasons.push(
-      `${colorName(oppositeColor(side))}의 ` +
-      `${opponentWeakest.name} ${opponentWeakest.square}는 ` +
-      `현재 실전적 가치 참고값이 상대적으로 낮음`
+  const difference =
+    whiteScore - blackScore;
+
+  let favoredSide = "equal";
+
+  if (difference > 0.12) {
+    favoredSide = "w";
+  } else if (difference < -0.12) {
+    favoredSide = "b";
+  }
+
+  const confidence =
+    clamp(
+      Math.abs(difference) /
+      0.8
     );
 
-  }
-
-
   /*
-     가장 좋은 기물끼리의 차이가 매우 작으면
-     전체 평균 차이가 있더라도 판정을 낮춘다.
-  */
-
-  let confidence =
-    "medium";
-
-
-  if (
-    ownStrongest &&
-    opponentStrongest
-  ) {
-
-    const strongestDifference =
-      ownStrongest.qualityScore -
-      opponentStrongest.qualityScore;
-
-
-    if (
-      side === "b"
-    ) {
-
-      if (
-        Math.abs(strongestDifference) < 4
-      ) {
-
-        confidence =
-          "low";
-
-
-        reasons.push(
-          "가장 좋은 마이너 피스끼리의 차이는 크지 않음"
-        );
-
-      }
-
-    } else {
-
-      if (
-        Math.abs(strongestDifference) < 4
-      ) {
-
-        confidence =
-          "low";
-
-
-        reasons.push(
-          "가장 좋은 마이너 피스끼리의 차이는 크지 않음"
-        );
-
-      }
-
-    }
-
-  }
-
-
-  if (
-    Math.abs(difference) >= 15
-  ) {
-
-    confidence =
-      "high";
-
-  }
-
-
-  /*
-     신뢰도가 낮아졌다면
-     "확정적인 우세" 대신 후보라고 명시한다.
-  */
+   * "우세"가 아니라 "우세 후보".
+   *
+   * 아직 pawn structure와 space,
+   * key squares 등의 관계를 모두 반영하지 않았기 때문이다.
+   */
+  const status =
+    favoredSide === "equal"
+      ? "균형 또는 불명확"
+      : "우세 후보";
 
   return {
-
-    side,
-
-    label:
-      `${colorName(side)} 우세 후보`,
-
-    difference,
+    favoredSide,
+    status,
 
     confidence,
 
-    reasons
+    whiteScore,
+    blackScore,
 
+    averageDifference,
+    practicalDifference,
+
+    strongestDifference,
+    weakestDifference,
+
+    equalCount,
+
+    explanation:
+      buildMinorComparisonExplanation(
+        favoredSide,
+        white,
+        black,
+        difference
+      )
   };
+}
 
+
+function buildMinorComparisonExplanation(
+  favoredSide,
+  white,
+  black,
+  difference
+) {
+  if (
+    favoredSide === "equal"
+  ) {
+    return (
+      "현재 기물의 활동성과 활용 가능성만으로는 한쪽의 명확한 우세를 확정하기 어렵습니다."
+    );
+  }
+
+  const side =
+    favoredSide === "w"
+      ? "백"
+      : "흑";
+
+  const own =
+    favoredSide === "w"
+      ? white
+      : black;
+
+  const opponent =
+    favoredSide === "w"
+      ? black
+      : white;
+
+  const reasons = [];
+
+  if (
+    own.averageQuality >
+    opponent.averageQuality +
+      0.08
+  ) {
+    reasons.push(
+      "평균적인 기물 활용 가능성이 더 높습니다"
+    );
+  }
+
+  if (
+    own.averagePractical >
+    opponent.averagePractical +
+      0.08
+  ) {
+    reasons.push(
+      "실전적으로 사용할 수 있는 활동성이 더 높습니다"
+    );
+  }
+
+  if (
+    own.strongest &&
+    opponent.weakest &&
+    own.strongest.qualityScore >
+      opponent.weakest.qualityScore +
+        0.10
+  ) {
+    reasons.push(
+      "강한 기물을 실제 약한 상대 기물과 연결해 활용할 가능성이 있습니다"
+    );
+  }
+
+  if (own.bishopPair) {
+    reasons.push(
+      "비숍 페어가 추가적인 긍정 신호입니다"
+    );
+  }
+
+  if (!reasons.length) {
+    reasons.push(
+      "현재 계산된 활동성과 활용 가능성에서 작은 차이가 있습니다"
+    );
+  }
+
+  return `${side} 쪽이 ${reasons.join(
+    ", "
+  )} 때문에 기물 우세 후보를 가집니다.`;
 }
 
 
 /* =========================================================
-   ② Superior Minor Piece Analyzer
-========================================================= */
+   MINOR PIECE SIDE ANALYSIS
+   ========================================================= */
 
-function analyzeSuperiorMinorPieces(
-  chess,
-  snapshot
+function analyzeMinorPieces(
+  chess
 ) {
-
-  const whitePieces =
-    snapshot.white.pieces.filter(
-      (piece) =>
-        piece.type === "b" ||
-        piece.type === "n"
-    );
-
-
-  const blackPieces =
-    snapshot.black.pieces.filter(
-      (piece) =>
-        piece.type === "b" ||
-        piece.type === "n"
-    );
-
-
-  const whiteAnalysis =
-    whitePieces.map(
-      (piece) =>
-        analyzeMinorPiece(
-          chess,
-          piece
-        )
-    );
-
-
-  const blackAnalysis =
-    blackPieces.map(
-      (piece) =>
-        analyzeMinorPiece(
-          chess,
-          piece
-        )
-    );
-
-
-  /*
-     평가 함수에서 Chess 객체를 사용할 수 있도록
-     임시 참조를 연결한다.
-
-     JSON DEBUG에는 함수/객체를 넣지 않는다.
-  */
-
-  for (
-    const piece of whiteAnalysis
-  ) {
-
-    piece.chess =
-      chess;
-
-  }
-
-
-  for (
-    const piece of blackAnalysis
-  ) {
-
-    piece.chess =
-      chess;
-
-  }
-
-
-  const whiteBishops =
-    whiteAnalysis.filter(
-      (piece) =>
-        piece.type === "b"
-    );
-
-
-  const whiteKnights =
-    whiteAnalysis.filter(
-      (piece) =>
-        piece.type === "n"
-    );
-
-
-  const blackBishops =
-    blackAnalysis.filter(
-      (piece) =>
-        piece.type === "b"
-    );
-
-
-  const blackKnights =
-    blackAnalysis.filter(
-      (piece) =>
-        piece.type === "n"
-    );
-
-
-  /*
-     진영 전체 평가
-
-     주의:
-     여기서 quality는 activity와 별개로
-     실제 대상/안전성/구조 적합성을 다시 평가한다.
-  */
-
-  const whiteSideQuality =
-    evaluateMinorSideQuality(
-      whiteAnalysis,
-      snapshot.white,
-      snapshot.pawnStructure,
+  const white =
+    analyzeMinorPiecesForSide(
+      chess,
       "w"
     );
 
-
-  const blackSideQuality =
-    evaluateMinorSideQuality(
-      blackAnalysis,
-      snapshot.black,
-      snapshot.pawnStructure,
+  const black =
+    analyzeMinorPiecesForSide(
+      chess,
       "b"
     );
 
-
-  const whiteAverageActivity =
-    whiteAnalysis.length
-      ? Math.round(
-          whiteAnalysis.reduce(
-            (sum, piece) =>
-              sum + piece.activityScore,
-            0
-          ) /
-          whiteAnalysis.length
-        )
-      : null;
-
-
-  const blackAverageActivity =
-    blackAnalysis.length
-      ? Math.round(
-          blackAnalysis.reduce(
-            (sum, piece) =>
-              sum + piece.activityScore,
-            0
-          ) /
-          blackAnalysis.length
-        )
-      : null;
-
-
-  const activityDifference =
-    whiteAverageActivity !== null &&
-    blackAverageActivity !== null
-      ? whiteAverageActivity -
-        blackAverageActivity
-      : null;
-
-
-  const qualityDifference =
-    whiteSideQuality.score !== null &&
-    blackSideQuality.score !== null
-      ? whiteSideQuality.score -
-        blackSideQuality.score
-      : null;
-
-
-  const advantage =
-    determineMinorPieceAdvantage(
-      whiteSideQuality,
-      blackSideQuality
+  const comparison =
+    compareMinorPieces(
+      white,
+      black
     );
 
-
   return {
-
-    type:
-      "superior_minor_piece",
-
-    white: {
-
-      pieces:
-        whiteAnalysis,
-
-      bishops:
-        whiteBishops,
-
-      knights:
-        whiteKnights,
-
-      bishopCount:
-        whiteBishops.length,
-
-      knightCount:
-        whiteKnights.length,
-
-      bishopPair:
-        whiteSideQuality.bishopPair,
-
-      averageActivity:
-        whiteAverageActivity,
-
-      averageQuality:
-        whiteSideQuality.score,
-
-      strongest:
-        whiteSideQuality.strongest,
-
-      weakest:
-        whiteSideQuality.weakest,
-
-      qualityReasons:
-        whiteSideQuality.reasons
-
-    },
-
-    black: {
-
-      pieces:
-        blackAnalysis,
-
-      bishops:
-        blackBishops,
-
-      knights:
-        blackKnights,
-
-      bishopCount:
-        blackBishops.length,
-
-      knightCount:
-        blackKnights.length,
-
-      bishopPair:
-        blackSideQuality.bishopPair,
-
-      averageActivity:
-        blackAverageActivity,
-
-      averageQuality:
-        blackSideQuality.score,
-
-      strongest:
-        blackSideQuality.strongest,
-
-      weakest:
-        blackSideQuality.weakest,
-
-      qualityReasons:
-        blackSideQuality.reasons
-
-    },
-
-    activityDifference,
-
-    qualityDifference,
-
-    advantage,
-
-    importance:
-      Math.min(
-        1,
-        Math.abs(
-          qualityDifference || 0
-        ) / 30
-      ),
-
-    bishopPair: {
-
-      white:
-        whiteSideQuality.bishopPair,
-
-      black:
-        blackSideQuality.bishopPair
-
-    }
-
+    white,
+    black,
+    comparison
   };
-
 }
 
 
 /* =========================================================
-   ③ Pawn Structure
-========================================================= */
+   PAWN STRUCTURE HELPERS
+   ========================================================= */
 
-
-/* ---------------------------------------------------------
-   폰 정보 가져오기
---------------------------------------------------------- */
-
-function getPawnsByColor(
-  snapshot,
+function getPawnSquares(
+  chess,
   color
 ) {
-
-  return (
-    color === "w"
-      ? snapshot.white.pawns
-      : snapshot.black.pawns
-  );
-
-}
-
-
-/* ---------------------------------------------------------
-   같은 파일의 폰
---------------------------------------------------------- */
-
-function getPawnsOnFile(
-  pawns,
-  file
-) {
-
-  return pawns.filter(
-    (pawn) =>
-      pawn.square[0] === file
-  );
-
-}
-
-
-/* ---------------------------------------------------------
-   인접 파일
---------------------------------------------------------- */
-
-function adjacentFiles(file) {
-
-  const index =
-    file.charCodeAt(0) - 97;
-
-
-  const result = [];
-
-
-  if (index > 0) {
-
-    result.push(
-      String.fromCharCode(
-        97 + index - 1
-      )
-    );
-
-  }
-
-
-  if (index < 7) {
-
-    result.push(
-      String.fromCharCode(
-        97 + index + 1
-      )
-    );
-
-  }
-
-
-  return result;
-
-}
-
-
-/* ---------------------------------------------------------
-   상대 폰이 전진 방향에 존재하는지
---------------------------------------------------------- */
-
-function enemyPawnAhead(
-  snapshot,
-  pawn,
-  color
-) {
-
-  const enemy =
-    oppositeColor(color);
-
-
-  const enemyPawns =
-    getPawnsByColor(
-      snapshot,
-      enemy
-    );
-
-
-  const {
-    file,
-    rank
-  } = squareToCoords(
-    pawn.square
-  );
-
+  const pawns = [];
 
   for (
-    const enemyPawn of enemyPawns
+    let rank = 1;
+    rank <= 8;
+    rank++
   ) {
-
-    const enemyCoords =
-      squareToCoords(
-        enemyPawn.square
-      );
-
-
-    if (
-      Math.abs(
-        enemyCoords.file - file
-      ) > 1
+    for (
+      let fileIndex = 0;
+      fileIndex < 8;
+      fileIndex++
     ) {
+      const square =
+        String.fromCharCode(
+          "a".charCodeAt(0) +
+            fileIndex
+        ) +
+        String(rank);
 
-      continue;
-
-    }
-
-
-    if (color === "w") {
-
-      if (
-        enemyCoords.rank > rank
-      ) {
-
-        return true;
-
-      }
-
-    } else {
-
-      if (
-        enemyCoords.rank < rank
-      ) {
-
-        return true;
-
-      }
-
-    }
-
-  }
-
-
-  return false;
-}
-
-
-/* ---------------------------------------------------------
-   패스드 폰
---------------------------------------------------------- */
-
-function isPassedPawn(
-  snapshot,
-  pawn,
-  color
-) {
-
-  return !enemyPawnAhead(
-    snapshot,
-    pawn,
-    color
-  );
-
-}
-
-
-/* ---------------------------------------------------------
-   연결된 폰
---------------------------------------------------------- */
-
-function isConnectedPawn(
-  pawns,
-  pawn
-) {
-
-  const fileIndex =
-    pawn.square.charCodeAt(0) - 97;
-
-
-  const rank =
-    Number(
-      pawn.square[1]
-    );
-
-
-  return pawns.some(
-    (other) => {
-
-      if (
-        other.square ===
-        pawn.square
-      ) {
-
-        return false;
-
-      }
-
-
-      const otherFile =
-        other.square.charCodeAt(0) - 97;
-
-
-      const otherRank =
-        Number(
-          other.square[1]
+      const piece =
+        getBoardPiece(
+          chess,
+          square
         );
 
-
-      return (
-        Math.abs(
-          otherFile - fileIndex
-        ) === 1 &&
-        otherRank === rank
-      );
-
+      if (
+        piece &&
+        piece.color === color &&
+        piece.type === "p"
+      ) {
+        pawns.push(square);
+      }
     }
-  );
-
-}
-
-
-/* ---------------------------------------------------------
-   폰 전진 가능성
---------------------------------------------------------- */
-
-function canPawnAdvance(
-  chess,
-  pawn
-) {
-
-  try {
-
-    const moves =
-      getLegalMovesForPiece(
-        chess,
-        pawn.square,
-        pawn.color
-      );
-
-
-    return moves.some(
-      (move) =>
-        move.to[0] ===
-        pawn.square[0]
-    );
-
-  } catch (error) {
-
-    return false;
-
   }
 
+  return pawns;
 }
 
 
-/* ---------------------------------------------------------
-   폰 방어자
---------------------------------------------------------- */
-
-function findPawnDefenders(
-  chess,
-  pawn
+function groupPawnsByFile(
+  pawnSquares
 ) {
-
-  const color =
-    pawn.color;
-
-
-  const board =
-    chess.board();
-
-
-  const defenders = [];
-
-
-  const sidePieces =
-    color === "w"
-      ? currentPawnSnapshot.white.pieces
-      : currentPawnSnapshot.black.pieces;
-
+  const files = {};
 
   for (
-    const piece of sidePieces
+    let fileIndex = 0;
+    fileIndex < 8;
+    fileIndex++
   ) {
-
-    if (
-      piece.square ===
-      pawn.square
-    ) {
-
-      continue;
-
-    }
-
-
-    if (
-      isPieceAttackingSquare(
-        board,
-        piece.square,
-        pawn.square,
-        color
-      )
-    ) {
-
-      defenders.push(
-        piece.square
+    const file =
+      String.fromCharCode(
+        "a".charCodeAt(0) +
+          fileIndex
       );
 
-    }
-
+    files[file] = [];
   }
 
+  for (
+    const square of pawnSquares
+  ) {
+    const file =
+      square[0];
 
-  return defenders;
+    files[file].push(
+      square
+    );
+  }
 
+  for (
+    const file of Object.keys(files)
+  ) {
+    files[file].sort(
+      (a, b) =>
+        Number(a[1]) -
+        Number(b[1])
+    );
+  }
+
+  return files;
 }
 
 
-/* ---------------------------------------------------------
-   기물이 특정 칸을 공격하는지
---------------------------------------------------------- */
-
-function isPieceAttackingSquare(
-  board,
-  fromSquare,
-  targetSquare,
-  color
+function isPawnIsolated(
+  pawnSquare,
+  pawnFiles
 ) {
+  const fileIndex =
+    pawnSquare.charCodeAt(0) -
+    "a".charCodeAt(0);
 
-  const piece =
-    getBoardPiece(
-      board,
-      fromSquare
+  const adjacentFiles = [];
+
+  if (fileIndex > 0) {
+    adjacentFiles.push(
+      String.fromCharCode(
+        "a".charCodeAt(0) +
+          fileIndex -
+          1
+      )
     );
-
-
-  if (
-    !piece ||
-    piece.color !== color
-  ) {
-
-    return false;
-
   }
 
-
-  const from =
-    squareToCoords(
-      fromSquare
+  if (fileIndex < 7) {
+    adjacentFiles.push(
+      String.fromCharCode(
+        "a".charCodeAt(0) +
+          fileIndex +
+          1
+      )
     );
+  }
+
+  return !adjacentFiles.some(
+    file =>
+      pawnFiles[file]?.length
+  );
+}
 
 
-  const target =
-    squareToCoords(
-      targetSquare
-    );
+function isPawnDoubled(
+  pawnSquare,
+  pawnFiles
+) {
+  const file =
+    pawnSquare[0];
+
+  return (
+    (pawnFiles[file]?.length || 0) >=
+    2
+  );
+}
 
 
-  const df =
-    target.file -
-    from.file;
+/*
+ * 같은 색 폰이 대각선으로 연결되어 있는지 확인한다.
+ *
+ * 방향이 중요하다.
+ *
+ * 백:
+ *   c3 → d4 / b4
+ *
+ * 흑:
+ *   c6 → d5 / b5
+ */
+function findPawnChainLinks(
+  pawnSquares,
+  color
+) {
+  const links = [];
 
+  const set =
+    new Set(pawnSquares);
 
-  const dr =
-    target.rank -
-    from.rank;
-
-
-  /*
-     폰
-  */
-
-  if (
-    piece.type === "p"
+  for (
+    const square of pawnSquares
   ) {
+    const coords =
+      squareToCoords(square);
+
+    if (!coords) continue;
 
     const direction =
       color === "w"
         ? 1
         : -1;
 
-
-    return (
-      dr === direction &&
-      Math.abs(df) === 1
-    );
-
-  }
-
-
-  /*
-     나이트
-  */
-
-  if (
-    piece.type === "n"
-  ) {
-
-    return (
-      (
-        Math.abs(df) === 1 &&
-        Math.abs(dr) === 2
-      ) ||
-      (
-        Math.abs(df) === 2 &&
-        Math.abs(dr) === 1
-      )
-    );
-
-  }
-
-
-  /*
-     킹
-  */
-
-  if (
-    piece.type === "k"
-  ) {
-
-    return (
-      Math.abs(df) <= 1 &&
-      Math.abs(dr) <= 1 &&
-      !(df === 0 && dr === 0)
-    );
-
-  }
-
-
-  /*
-     룩 / 퀸 직선
-  */
-
-  if (
-    piece.type === "r" ||
-    piece.type === "q"
-  ) {
-
-    if (
-      df === 0 ||
-      dr === 0
+    for (
+      const fileOffset of [-1, 1]
     ) {
-
-      const stepFile =
-        Math.sign(df);
-
-
-      const stepRank =
-        Math.sign(dr);
-
-
-      let file =
-        from.file +
-        stepFile;
-
-
-      let rank =
-        from.rank +
-        stepRank;
-
-
-      while (
-        file !== target.file ||
-        rank !== target.rank
-      ) {
-
-        const square =
-          coordsToSquare(
-            file,
-            rank
-          );
-
-
-        if (
-          getBoardPiece(
-            board,
-            square
-          )
-        ) {
-
-          return false;
-
-        }
-
-
-        file += stepFile;
-        rank += stepRank;
-
-      }
-
-
-      return true;
-
-    }
-
-  }
-
-
-  /*
-     비숍 / 퀸 대각선
-  */
-
-  if (
-    piece.type === "b" ||
-    piece.type === "q"
-  ) {
-
-    if (
-      Math.abs(df) !==
-      Math.abs(dr)
-    ) {
-
-      return false;
-
-    }
-
-
-    const stepFile =
-      Math.sign(df);
-
-
-    const stepRank =
-      Math.sign(dr);
-
-
-    let file =
-      from.file +
-      stepFile;
-
-
-    let rank =
-      from.rank +
-      stepRank;
-
-
-    while (
-      file !== target.file ||
-      rank !== target.rank
-    ) {
-
-      const square =
+      const target =
         coordsToSquare(
-          file,
-          rank
+          coords.file +
+            fileOffset,
+          coords.rank +
+            direction
         );
 
-
       if (
-        getBoardPiece(
-          board,
-          square
-        )
+        target &&
+        set.has(target)
       ) {
-
-        return false;
-
+        links.push({
+          from: square,
+          to: target
+        });
       }
-
-
-      file += stepFile;
-      rank += stepRank;
-
     }
-
-
-    return true;
-
   }
 
-
-  return false;
+  return links;
 }
 
 
-/* ---------------------------------------------------------
-   폰 브레이크 후보
---------------------------------------------------------- */
-
-function findPawnBreaks(
+function isPassedPawn(
   chess,
-  snapshot,
+  square,
   color
 ) {
+  const coords =
+    squareToCoords(square);
 
-  const pawns =
-    getPawnsByColor(
-      snapshot,
+  if (!coords) return false;
+
+  const enemy =
+    oppositeColor(color);
+
+  const enemyPawns =
+    getPawnSquares(
+      chess,
+      enemy
+    );
+
+  for (
+    const enemySquare of enemyPawns
+  ) {
+    const enemyCoords =
+      squareToCoords(
+        enemySquare
+      );
+
+    if (!enemyCoords) continue;
+
+    if (
+      Math.abs(
+        enemyCoords.file -
+          coords.file
+      ) > 1
+    ) {
+      continue;
+    }
+
+    if (color === "w") {
+      if (
+        enemyCoords.rank >
+        coords.rank
+      ) {
+        return false;
+      }
+    } else {
+      if (
+        enemyCoords.rank <
+        coords.rank
+      ) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+
+function isProtectedPassedPawn(
+  chess,
+  square,
+  color
+) {
+  if (
+    !isPassedPawn(
+      chess,
+      square,
+      color
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * "보호된 passed pawn"은
+   * 같은 색 폰이 보호해야 한다.
+   *
+   * 비숍이나 룩이 보호한다고 해서
+   * protected passed pawn으로 부르지 않는다.
+   */
+  const pawnDefenders =
+    getPawnDefenders(
+      chess,
+      square,
       color
     );
 
+  return (
+    pawnDefenders.length > 0
+  );
+}
 
-  const breaks = [];
 
+/*
+ * backward pawn은 완전히 확정하기 어려운 개념이므로
+ * 여기서는 "후보"로만 기록한다.
+ *
+ * 확정적인 전략 판단은 나중에
+ * 실제 공격 가능성 / 전진 가능성 / 교환 구조와
+ * 함께 평가한다.
+ */
+function isBackwardPawnCandidate(
+  chess,
+  square,
+  color,
+  pawnFiles
+) {
+  const coords =
+    squareToCoords(square);
+
+  if (!coords) return false;
+
+  if (
+    isPawnIsolated(
+      square,
+      pawnFiles
+    )
+  ) {
+    return false;
+  }
+
+  const fileIndex =
+    coords.file;
+
+  const adjacentFiles = [];
+
+  if (fileIndex > 0) {
+    adjacentFiles.push(
+      String.fromCharCode(
+        "a".charCodeAt(0) +
+          fileIndex -
+          1
+      )
+    );
+  }
+
+  if (fileIndex < 7) {
+    adjacentFiles.push(
+      String.fromCharCode(
+        "a".charCodeAt(0) +
+          fileIndex +
+          1
+      )
+    );
+  }
+
+  const direction =
+    color === "w"
+      ? 1
+      : -1;
+
+  const hasMoreAdvancedNeighbor =
+    adjacentFiles.some(
+      file =>
+        pawnFiles[file]?.some(
+          pawnSquare => {
+            const pawnCoords =
+              squareToCoords(
+                pawnSquare
+              );
+
+            if (!pawnCoords) {
+              return false;
+            }
+
+            return color === "w"
+              ? pawnCoords.rank >
+                  coords.rank
+              : pawnCoords.rank <
+                  coords.rank;
+          }
+        )
+    );
+
+  if (
+    !hasMoreAdvancedNeighbor
+  ) {
+    return false;
+  }
+
+  /*
+   * 앞 칸이 막혀 있으면
+   * backward 후보라는 신호가 조금 강해진다.
+   */
+  const frontRank =
+    coords.rank +
+    direction;
+
+  const frontSquare =
+    coordsToSquare(
+      coords.file,
+      frontRank
+    );
+
+  const frontPiece =
+    frontSquare
+      ? getBoardPiece(
+          chess,
+          frontSquare
+        )
+      : null;
+
+  return (
+    !!frontPiece &&
+    frontPiece.color !== color
+  );
+         }
+/* =========================================================
+   PAWN STRUCTURE ANALYSIS
+   ========================================================= */
+
+function analyzePawnSide(
+  chess,
+  color
+) {
+  const pawnSquares =
+    getPawnSquares(
+      chess,
+      color
+    );
+
+  const pawnFiles =
+    groupPawnsByFile(
+      pawnSquares
+    );
+
+  const enemy =
+    oppositeColor(color);
+
+  const pawns = [];
 
   for (
-    const pawn of pawns
+    const square of pawnSquares
   ) {
+    const coords =
+      squareToCoords(square);
 
-    const moves =
-      getLegalMovesForPiece(
+    if (!coords) continue;
+
+    const isolated =
+      isPawnIsolated(
+        square,
+        pawnFiles
+      );
+
+    const doubled =
+      isPawnDoubled(
+        square,
+        pawnFiles
+      );
+
+    const passed =
+      isPassedPawn(
         chess,
-        pawn.square,
+        square,
         color
       );
 
+    const protectedPassed =
+      isProtectedPassedPawn(
+        chess,
+        square,
+        color
+      );
 
-    for (
-      const move of moves
-    ) {
+    const backwardCandidate =
+      isBackwardPawnCandidate(
+        chess,
+        square,
+        color,
+        pawnFiles
+      );
 
-      if (
-        move.captured === "p"
-      ) {
+    const pawnDefenders =
+      getPawnDefenders(
+        chess,
+        square,
+        color
+      );
 
-        breaks.push({
+    const pawnAttackers =
+      getPawnDefenders(
+        chess,
+        square,
+        enemy
+      );
 
-          from:
-            move.from,
+    /*
+     * 해당 폰 자체가 상대 폰에게
+     * 직접 공격받는지 확인한다.
+     */
+    const attackers =
+      getAttackersOfSquare(
+        chess,
+        square,
+        enemy
+      );
 
-          to:
-            move.to,
+    const defenders =
+      getAttackersOfSquare(
+        chess,
+        square,
+        color
+      );
 
-          type:
-            "capture",
+    /*
+     * 전진 가능성.
+     *
+     * 여기서는 "당장 법적으로 한 칸 전진할 수 있는가"를
+     * 확인한다.
+     *
+     * 이것만으로 좋은 폰/나쁜 폰을 확정하지 않는다.
+     */
+    const legalPawnMoves =
+      getLegalMovesForPiece(
+        chess,
+        square,
+        color
+      );
 
-          san:
-            move.san
+    const forwardMoves =
+      legalPawnMoves.filter(
+        move =>
+          !move.captured
+      );
 
-        });
+    const captureMoves =
+      legalPawnMoves.filter(
+        move =>
+          !!move.captured
+      );
 
-      }
+    /*
+     * 폰이 실제로 상대 폰을 공격하고 있는지도 기록한다.
+     */
+    const attackedEnemyPawns =
+      captureMoves.filter(
+        move => {
+          const target =
+            getBoardPiece(
+              chess,
+              move.to
+            );
 
+          return (
+            target &&
+            target.color === enemy &&
+            target.type === "p"
+          );
+        }
+      );
+
+    const file =
+      square[0];
+
+    const rank =
+      Number(square[1]);
+
+    /*
+     * 폰의 상대 진영 전진 정도.
+     * 이것 역시 강함/약함이 아니라
+     * 구조적 위치를 표현하기 위한 값이다.
+     */
+    const advancement =
+      color === "w"
+        ? clamp(
+            (rank - 2) / 5
+          )
+        : clamp(
+            (7 - rank) / 5
+          );
+
+    pawns.push({
+      square,
+      color,
+
+      file,
+      rank,
+
+      isolated,
+      doubled,
+
+      passed,
+      protectedPassed,
+
+      backwardCandidate,
+
+      pawnDefenders,
+      pawnAttackers,
+
+      attackers,
+      defenders,
+
+      attackerCount:
+        attackers.length,
+
+      defenderCount:
+        defenders.length,
+
+      legalPawnMoves:
+        legalPawnMoves.length,
+
+      forwardMoves:
+        forwardMoves.length,
+
+      captureMoves:
+        captureMoves.length,
+
+      attackedEnemyPawns:
+        attackedEnemyPawns.length,
+
+      advancement
+    });
+  }
+
+  const chains =
+    findPawnChainLinks(
+      pawnSquares,
+      color
+    );
+
+  const passedPawns =
+    pawns.filter(
+      pawn => pawn.passed
+    );
+
+  const protectedPassedPawns =
+    pawns.filter(
+      pawn =>
+        pawn.protectedPassed
+    );
+
+  const isolatedPawns =
+    pawns.filter(
+      pawn =>
+        pawn.isolated
+    );
+
+  const doubledPawns =
+    pawns.filter(
+      pawn =>
+        pawn.doubled
+    );
+
+  const backwardCandidates =
+    pawns.filter(
+      pawn =>
+        pawn.backwardCandidate
+    );
+
+  const targets =
+    pawns.filter(
+      pawn =>
+        pawn.attackerCount >
+        0
+    );
+
+  /*
+   * 구조적 사실을 모은다.
+   *
+   * 여기서는 아직
+   * "고립폰 = 약점"
+   * "더블폰 = 약점"
+   * 같은 최종 결론을 내리지 않는다.
+   */
+  return {
+    color,
+
+    pawnSquares,
+    pawnFiles,
+
+    pawns,
+
+    pawnCount:
+      pawns.length,
+
+    chains,
+
+    chainCount:
+      chains.length,
+
+    passedPawns,
+
+    protectedPassedPawns,
+
+    isolatedPawns,
+
+    doubledPawns,
+
+    backwardCandidates,
+
+    targets,
+
+    structuralFacts: {
+      isolatedCount:
+        isolatedPawns.length,
+
+      doubledCount:
+        doubledPawns.length,
+
+      passedCount:
+        passedPawns.length,
+
+      protectedPassedCount:
+        protectedPassedPawns.length,
+
+      backwardCandidateCount:
+        backwardCandidates.length,
+
+      chainCount:
+        chains.length
     }
+  };
+}
 
+
+/* =========================================================
+   PAWN BREAKS
+   ========================================================= */
+
+/*
+ * 모든 폰 전진을 "pawn break"라고 부르지 않는다.
+ *
+ * 여기서는 다음과 같은 경우를 break 후보로 기록한다.
+ *
+ * 1. 폰이 상대 폰을 직접 잡을 수 있는 경우
+ * 2. 폰이 전진함으로써 상대 폰을 새롭게 공격하게 되는 경우
+ *
+ * 최종적인 전략적 의미는 나중에
+ * fixed structure / space / open file과 함께 판단한다.
+ */
+function findPawnBreaks(
+  chess,
+  color
+) {
+  const pawnSquares =
+    getPawnSquares(
+      chess,
+      color
+    );
+
+  const enemy =
+    oppositeColor(color);
+
+  const breaks = [];
+
+  for (
+    const square of pawnSquares
+  ) {
+    const moves =
+      getLegalMovesForPiece(
+        chess,
+        square,
+        color
+      );
 
     for (
       const move of moves
     ) {
+      let isBreak =
+        false;
 
+      let reason =
+        "";
+
+      /*
+       * A. 상대 폰을 직접 잡는 경우
+       */
       if (
         move.captured
       ) {
-
-        continue;
-
-      }
-
-
-      if (
-        move.to[0] ===
-        pawn.square[0]
-      ) {
-
-        const targetRank =
-          Number(
-            move.to[1]
+        const target =
+          getBoardPiece(
+            chess,
+            move.to
           );
-
-
-        const enemy =
-          oppositeColor(color);
-
-
-        const enemyPawns =
-          getPawnsByColor(
-            snapshot,
-            enemy
-          );
-
-
-        const createsContact =
-          enemyPawns.some(
-            (enemyPawn) => {
-
-              const ef =
-                enemyPawn.square
-                  .charCodeAt(0) - 97;
-
-
-              const tf =
-                move.to
-                  .charCodeAt(0) - 97;
-
-
-              const er =
-                Number(
-                  enemyPawn.square[1]
-                );
-
-
-              return (
-                Math.abs(
-                  ef - tf
-                ) <= 1 &&
-                Math.abs(
-                  er - targetRank
-                ) <= 1
-              );
-
-            }
-          );
-
 
         if (
-          createsContact
+          target &&
+          target.color === enemy &&
+          target.type === "p"
         ) {
+          isBreak = true;
 
-          breaks.push({
-
-            from:
-              move.from,
-
-            to:
-              move.to,
-
-            type:
-              "advance",
-
-            san:
-              move.san
-
-          });
-
+          reason =
+            "상대 폰을 직접 공격/교환하는 pawn break 후보";
         }
-
       }
 
+      /*
+       * B. 전진 후 상대 폰을 공격하게 되는 경우
+       */
+      if (
+        !isBreak &&
+        !move.captured
+      ) {
+        try {
+          const testChess =
+            createChessForColor(
+              chess,
+              color
+            );
+
+          if (testChess) {
+            const executed =
+              testChess.move({
+                from: move.from,
+                to: move.to,
+                promotion:
+                  move.promotion ||
+                  "q"
+              });
+
+            if (executed) {
+              const newPawn =
+                getBoardPiece(
+                  testChess,
+                  move.to
+                );
+
+              if (
+                newPawn &&
+                newPawn.type === "p" &&
+                newPawn.color === color
+              ) {
+                const coords =
+                  squareToCoords(
+                    move.to
+                  );
+
+                if (coords) {
+                  const direction =
+                    color === "w"
+                      ? 1
+                      : -1;
+
+                  for (
+                    const fileOffset of [
+                      -1,
+                      1
+                    ]
+                  ) {
+                    const target =
+                      coordsToSquare(
+                        coords.file +
+                          fileOffset,
+                        coords.rank +
+                          direction
+                      );
+
+                    if (!target) {
+                      continue;
+                    }
+
+                    const targetPiece =
+                      getBoardPiece(
+                        testChess,
+                        target
+                      );
+
+                    if (
+                      targetPiece &&
+                      targetPiece.color ===
+                        enemy &&
+                      targetPiece.type === "p"
+                    ) {
+                      isBreak = true;
+
+                      reason =
+                        "전진 후 상대 폰 구조를 직접 압박하는 pawn break 후보";
+
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (isBreak) {
+        breaks.push({
+          from: move.from,
+          to: move.to,
+          color,
+          captured:
+            move.captured || null,
+          reason
+        });
+      }
     }
-
   }
-
 
   return breaks;
 }
 
 
-/* ---------------------------------------------------------
-   폰 타깃 후보
---------------------------------------------------------- */
+/* =========================================================
+   PAWN STRUCTURE COMPARISON
+   ========================================================= */
 
-function findPawnTargets(
-  chess,
-  snapshot,
-  color
+function scorePawnStructureFacts(
+  sideData
 ) {
-
-  const pawns =
-    getPawnsByColor(
-      snapshot,
-      color
-    );
-
-
-  const enemy =
-    oppositeColor(color);
-
-
-  const enemyPieces =
-    enemy === "w"
-      ? snapshot.white.pieces
-      : snapshot.black.pieces;
-
-
-  const targets = [];
-
-
-  for (
-    const pawn of pawns
-  ) {
-
-    const attackers = [];
-
-
-    for (
-      const piece of enemyPieces
-    ) {
-
-      if (
-        isPieceAttackingSquare(
-          chess.board(),
-          piece.square,
-          pawn.square,
-          enemy
-        )
-      ) {
-
-        attackers.push(
-          piece.square
-        );
-
-      }
-
-    }
-
-
-    if (
-      attackers.length > 0
-    ) {
-
-      targets.push({
-
-        square:
-          pawn.square,
-
-        attackers
-
-      });
-
-    }
-
-  }
-
-
-  return targets;
-}
-
-
-/* ---------------------------------------------------------
-   백워드 폰 후보
---------------------------------------------------------- */
-
-function isBackwardPawnCandidate(
-  snapshot,
-  pawn,
-  color
-) {
-
-  const pawns =
-    getPawnsByColor(
-      snapshot,
-      color
-    );
-
-
-  const fileIndex =
-    pawn.square.charCodeAt(0) - 97;
-
-
-  const rank =
-    Number(
-      pawn.square[1]
-    );
-
-
-  const adjacent =
-    pawns.filter(
-      (other) => {
-
-        if (
-          other.square ===
-          pawn.square
-        ) {
-
-          return false;
-
-        }
-
-
-        const otherFile =
-          other.square.charCodeAt(0) - 97;
-
-
-        return (
-          Math.abs(
-            otherFile -
-            fileIndex
-          ) === 1
-        );
-
-      }
-    );
-
-
-  if (!adjacent.length) {
-
-    return false;
-
-  }
-
-
-  if (color === "w") {
-
-    const moreAdvancedNeighbor =
-      adjacent.some(
-        (other) =>
-          Number(
-            other.square[1]
-          ) > rank
-      );
-
-
-    if (
-      !moreAdvancedNeighbor
-    ) {
-
-      return false;
-
-    }
-
-  } else {
-
-    const moreAdvancedNeighbor =
-      adjacent.some(
-        (other) =>
-          Number(
-            other.square[1]
-          ) < rank
-      );
-
-
-    if (
-      !moreAdvancedNeighbor
-    ) {
-
-      return false;
-
-    }
-
-  }
-
-
-  return enemyPawnAhead(
-    snapshot,
-    pawn,
-    color
-  );
-
-}
-
-
-/* ---------------------------------------------------------
-   폰 체인
---------------------------------------------------------- */
-
-function findPawnChains(
-  pawns,
-  color
-) {
-
-  const chains = [];
-
-  const visited =
-    new Set();
-
-
-  function pawnKey(pawn) {
-
-    return pawn.square;
-
-  }
-
-
-  for (
-    const startPawn of pawns
-  ) {
-
-    if (
-      visited.has(
-        pawnKey(startPawn)
+  /*
+   * 이 값은 "좋고 나쁨"의 확정 점수가 아니다.
+   *
+   * 단순히 향후 실질적 약점 평가에 사용할
+   * 구조적 신호를 정리하는 내부 휴리스틱이다.
+   */
+
+  const passedBonus =
+    sideData.passedPawns.length *
+    0.18;
+
+  const protectedPassedBonus =
+    sideData.protectedPassedPawns.length *
+    0.12;
+
+  const isolatedSignal =
+    sideData.isolatedPawns.length *
+    0.12;
+
+  const doubledSignal =
+    sideData.doubledPawns.length *
+    0.10;
+
+  const backwardSignal =
+    sideData.backwardCandidates.length *
+    0.12;
+
+  const chainSignal =
+    sideData.chains.length *
+    0.05;
+
+  /*
+   * 여기서는 좋은/나쁜 점수를 바로 만들지 않고
+   * "구조 복잡도" 정도만 기록한다.
+   */
+  return {
+    passedBonus,
+    protectedPassedBonus,
+    isolatedSignal,
+    doubledSignal,
+    backwardSignal,
+    chainSignal,
+
+    structuralComplexity:
+      clamp(
+        (
+          isolatedSignal +
+          doubledSignal +
+          backwardSignal +
+          chainSignal
+        ) / 2
       )
-    ) {
-
-      continue;
-
-    }
-
-
-    const chain = [];
-
-
-    const queue = [
-      startPawn
-    ];
-
-
-    while (
-      queue.length
-    ) {
-
-      const pawn =
-        queue.shift();
-
-
-      const key =
-        pawnKey(pawn);
-
-
-      if (
-        visited.has(key)
-      ) {
-
-        continue;
-
-      }
-
-
-      visited.add(key);
-
-      chain.push(
-        pawn.square
-      );
-
-
-      const fileIndex =
-        pawn.square
-          .charCodeAt(0) - 97;
-
-
-      const rank =
-        Number(
-          pawn.square[1]
-        );
-
-
-      for (
-        const other of pawns
-      ) {
-
-        if (
-          visited.has(
-            pawnKey(other)
-          )
-        ) {
-
-          continue;
-
-        }
-
-
-        const otherFile =
-          other.square
-            .charCodeAt(0) - 97;
-
-
-        const otherRank =
-          Number(
-            other.square[1]
-          );
-
-
-        if (
-          Math.abs(
-            otherFile -
-            fileIndex
-          ) === 1 &&
-          (
-            otherRank === rank ||
-            Math.abs(
-              otherRank -
-              rank
-            ) === 1
-          )
-        ) {
-
-          queue.push(
-            other
-          );
-
-        }
-
-      }
-
-    }
-
-
-    if (
-      chain.length >= 2
-    ) {
-
-      chains.push(
-        chain
-      );
-
-    }
-
-  }
-
-
-  return chains;
+  };
 }
 
 
-/* ---------------------------------------------------------
-   체인의 기초 / 끝
---------------------------------------------------------- */
-
-function chainBaseAndTip(
-  chain,
-  color
+function comparePawnStructures(
+  white,
+  black
 ) {
+  const whiteSignals =
+    scorePawnStructureFacts(
+      white
+    );
+
+  const blackSignals =
+    scorePawnStructureFacts(
+      black
+    );
+
+  /*
+   * 중요한 원칙:
+   *
+   * isolated / doubled / backward가 많다고 해서
+   * 바로 그쪽이 불리하다고 결론내리지 않는다.
+   *
+   * 상대가 실제로 공격할 수 있어야 한다.
+   */
+
+  const whitePassed =
+    white.passedPawns.length;
+
+  const blackPassed =
+    black.passedPawns.length;
+
+  const whiteProtectedPassed =
+    white.protectedPassedPawns.length;
+
+  const blackProtectedPassed =
+    black.protectedPassedPawns.length;
+
+  const whiteTargets =
+    white.targets.length;
+
+  const blackTargets =
+    black.targets.length;
+
+  let structuralDirection =
+    "unclear";
 
   if (
-    !chain.length
+    whiteProtectedPassed >
+      blackProtectedPassed ||
+    (
+      whitePassed >
+        blackPassed &&
+      whiteTargets <=
+        blackTargets
+    )
   ) {
-
-    return {
-
-      base: null,
-
-      tip: null
-
-    };
-
+    structuralDirection = "w";
+  } else if (
+    blackProtectedPassed >
+      whiteProtectedPassed ||
+    (
+      blackPassed >
+        whitePassed &&
+      blackTargets <=
+        whiteTargets
+    )
+  ) {
+    structuralDirection = "b";
   }
 
-
-  const sorted =
-    [...chain].sort(
-      (a, b) => {
-
-        const rankA =
-          Number(
-            a[1]
-          );
-
-
-        const rankB =
-          Number(
-            b[1]
-          );
-
-
-        return color === "w"
-          ? rankA - rankB
-          : rankB - rankA;
-
-      }
-    );
-
+  /*
+   * 이것은 매우 보수적인 값이다.
+   * 실제 pawn structure 우세는
+   * 공격 가능성, 공간, 열린 파일,
+   * 기물 배치 등을 추가해야 확정할 수 있다.
+   */
+  const confidence =
+    structuralDirection ===
+      "unclear"
+      ? 0
+      : 0.25;
 
   return {
+    structuralDirection,
 
-    base:
-      sorted[0],
+    confidence,
 
-    tip:
-      sorted[
-        sorted.length - 1
-      ]
+    whiteSignals,
+    blackSignals,
 
+    whitePassed,
+    blackPassed,
+
+    whiteProtectedPassed,
+    blackProtectedPassed,
+
+    whiteTargets,
+    blackTargets,
+
+    explanation:
+      buildPawnComparisonExplanation(
+        structuralDirection,
+        white,
+        black
+      )
   };
-
 }
 
 
-/* ---------------------------------------------------------
-   보호된 패스드 폰 안전 계산
---------------------------------------------------------- */
-
-function isProtectedPassedPawnSafe(
-  pawns,
-  pawn
+function buildPawnComparisonExplanation(
+  direction,
+  white,
+  black
 ) {
-
-  const fileIndex =
-    pawn.square.charCodeAt(0) - 97;
-
-
-  const rank =
-    Number(
-      pawn.square[1]
+  if (
+    direction ===
+    "unclear"
+  ) {
+    return (
+      "현재 폰 구조의 사실만으로는 한쪽의 명확한 구조적 우세를 확정하기 어렵습니다."
     );
+  }
 
+  const side =
+    direction === "w"
+      ? "백"
+      : "흑";
 
-  return pawns.some(
-    (other) => {
+  const own =
+    direction === "w"
+      ? white
+      : black;
 
-      if (
-        other.square ===
-        pawn.square
-      ) {
+  const reasons = [];
 
-        return false;
+  if (
+    own.protectedPassedPawns
+      .length > 0
+  ) {
+    reasons.push(
+      "보호된 패스폰이 있습니다"
+    );
+  }
 
-      }
+  if (
+    own.passedPawns.length > 0
+  ) {
+    reasons.push(
+      "패스폰 후보가 있습니다"
+    );
+  }
 
+  if (
+    own.chains.length > 0
+  ) {
+    reasons.push(
+      "폰 연결 구조가 있습니다"
+    );
+  }
 
-      const otherFile =
-        other.square
-          .charCodeAt(0) - 97;
+  if (!reasons.length) {
+    reasons.push(
+      "상대보다 유리할 가능성이 있는 구조적 신호가 있습니다"
+    );
+  }
 
-
-      const otherRank =
-        Number(
-          other.square[1]
-        );
-
-
-      return (
-        Math.abs(
-          otherFile -
-          fileIndex
-        ) === 1 &&
-        (
-          otherRank === rank - 1 ||
-          otherRank === rank + 1
-        )
-      );
-
-    }
-  );
-
+  return `${side} 쪽에 ${reasons.join(
+    ", "
+  )}. 다만 실제 약점 여부는 기물의 공격 가능성과 함께 판단해야 합니다.`;
 }
 
 
-/* ---------------------------------------------------------
-   한 진영의 폰 구조 분석
---------------------------------------------------------- */
-
-function analyzePawnSide(
-  chess,
-  snapshot,
-  color
-) {
-
-  const pawns =
-    getPawnsByColor(
-      snapshot,
-      color
-    );
-
-
-  const files = {};
-
-
-  for (
-    const file of "abcdefgh"
-  ) {
-
-    files[file] =
-      getPawnsOnFile(
-        pawns,
-        file
-      );
-
-  }
-
-
-  const doubled = [];
-
-
-  for (
-    const file of Object.keys(files)
-  ) {
-
-    if (
-      files[file].length >= 2
-    ) {
-
-      doubled.push({
-
-        file,
-
-        pawns:
-          files[file].map(
-            (pawn) =>
-              pawn.square
-          )
-
-      });
-
-    }
-
-  }
-
-
-  const isolated = [];
-
-
-  for (
-    const pawn of pawns
-  ) {
-
-    const adjacent =
-      adjacentFiles(
-        pawn.square[0]
-      );
-
-
-    const hasFriendlyAdjacentPawn =
-      adjacent.some(
-        (file) =>
-          files[file].length > 0
-      );
-
-
-    if (
-      !hasFriendlyAdjacentPawn
-    ) {
-
-      isolated.push(
-        pawn.square
-      );
-
-    }
-
-  }
-
-
-  const passed = [];
-
-  const protectedPassed = [];
-
-  const connected = [];
-
-  const backward = [];
-
-
-  for (
-    const pawn of pawns
-  ) {
-
-    if (
-      isPassedPawn(
-        snapshot,
-        pawn,
-        color
-      )
-    ) {
-
-      passed.push(
-        pawn.square
-      );
-
-
-      if (
-        isProtectedPassedPawnSafe(
-          pawns,
-          pawn
-        )
-      ) {
-
-        protectedPassed.push(
-          pawn.square
-        );
-
-      }
-
-    }
-
-
-    if (
-      isConnectedPawn(
-        pawns,
-        pawn
-      )
-    ) {
-
-      connected.push(
-        pawn.square
-      );
-
-    }
-
-
-    if (
-      isBackwardPawnCandidate(
-        snapshot,
-        pawn,
-        color
-      )
-    ) {
-
-      backward.push(
-        pawn.square
-      );
-
-    }
-
-  }
-
-
-  const chains =
-    findPawnChains(
-      pawns,
-      color
-    );
-
-
-  const chainDetails =
-    chains.map(
-      (chain) => {
-
-        const ends =
-          chainBaseAndTip(
-            chain,
-            color
-          );
-
-
-        return {
-
-          pawns:
-            chain,
-
-          base:
-            ends.base,
-
-          tip:
-            ends.tip
-
-        };
-
-      }
-    );
-
-
-  const pawnDetails =
-    pawns.map(
-      (pawn) => {
-
-        const defenders =
-          findPawnDefenders(
-            chess,
-            pawn
-          );
-
-
-        return {
-
-          square:
-            pawn.square,
-
-          isDoubled:
-            files[
-              pawn.square[0]
-            ].length >= 2,
-
-          isIsolated:
-            isolated.includes(
-              pawn.square
-            ),
-
-          isPassed:
-            passed.includes(
-              pawn.square
-            ),
-
-          isProtectedPassed:
-            protectedPassed.includes(
-              pawn.square
-            ),
-
-          isConnected:
-            connected.includes(
-              pawn.square
-            ),
-
-          isBackwardCandidate:
-            backward.includes(
-              pawn.square
-            ),
-
-          canAdvance:
-            canPawnAdvance(
-              chess,
-              pawn
-            ),
-
-          defenders
-
-        };
-
-      }
-    );
-
-
-  const breaks =
-    findPawnBreaks(
-      chess,
-      snapshot,
-      color
-    );
-
-
-  const targets =
-    findPawnTargets(
-      chess,
-      snapshot,
-      color
-    );
-
-
-  return {
-
-    color,
-
-    side:
-      colorName(color),
-
-    pawnCount:
-      pawns.length,
-
-    pawns:
-      pawnDetails,
-
-    doubled,
-
-    isolated,
-
-    backward,
-
-    connected,
-
-    passed,
-
-    protectedPassed,
-
-    chains:
-      chainDetails,
-
-    breaks,
-
-    targets
-
-  };
-
-}
-
-
-/* ---------------------------------------------------------
-   전체 Pawn Structure
---------------------------------------------------------- */
+/* =========================================================
+   COMPLETE PAWN ANALYSIS
+   ========================================================= */
 
 function analyzePawnStructure(
-  chess,
-  snapshot
+  chess
 ) {
-
-  currentPawnSnapshot =
-    snapshot;
-
-
   const white =
     analyzePawnSide(
       chess,
-      snapshot,
       "w"
     );
-
 
   const black =
     analyzePawnSide(
       chess,
-      snapshot,
       "b"
     );
 
+  const whiteBreaks =
+    findPawnBreaks(
+      chess,
+      "w"
+    );
+
+  const blackBreaks =
+    findPawnBreaks(
+      chess,
+      "b"
+    );
+
+  white.pawnBreaks =
+    whiteBreaks;
+
+  black.pawnBreaks =
+    blackBreaks;
+
+  const comparison =
+    comparePawnStructures(
+      white,
+      black
+    );
 
   return {
-
-    type:
-      "pawn_structure",
-
     white,
-
     black,
 
-    advantage:
-      "undetermined",
+    comparison,
 
-    importance: 0
-
-  };
-
-}
-
-
-/* =========================================================
-   Superior Minor Piece 화면
-========================================================= */
-
-function renderMinorPieceList(
-  pieces
-) {
-
-  if (!pieces.length) {
-
-    return `
-      <div class="analysis-note">
-        현재 이 진영에는 비숍이나 나이트가 없습니다.
-      </div>
-    `;
-
-  }
-
-
-  return pieces.map(
-    (piece) => {
-
-      const specialText =
-        piece.type === "n"
-          ? (
-              piece.outpostCandidate
-                ? "아웃포스트 후보 있음"
-                : "아웃포스트 후보 없음"
-            )
-          : (
-              `긴 대각선 접근 ${piece.bishopInfo.longDiagonalAccess}개`
-            );
-
-
-      const qualityText =
-        piece.qualityScore !== undefined
-          ? `실전적 가치 참고값 ${piece.qualityScore}`
-          : "";
-
-
-      const targetText =
-        piece.targetAccess &&
-        piece.targetAccess.targets &&
-        piece.targetAccess.targets.length
-          ? `실제 접근 대상 ${piece.targetAccess.targets.length}개`
-          : "직접 접근 대상 뚜렷하지 않음";
-
-
-      const reasonText =
-        piece.qualityReasons &&
-        piece.qualityReasons.length
-          ? piece.qualityReasons
-              .slice(0, 3)
-              .join(" · ")
-          : "추가적인 우세 근거가 뚜렷하지 않음";
-
-
-      return `
-        <div class="minor-piece-item">
-
-          <div class="minor-piece-header">
-
-            <strong>
-              ${piece.name} ${piece.square}
-            </strong>
-
-            <span>
-              활동성 ${piece.activityScore}
-            </span>
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            이동 가능 ${piece.legalMobility}
-
-            · 안전한 이동 ${piece.safeMobility}
-
-            · 중앙 접근 ${piece.centralMoves}
-
-            · 잡을 수 있는 기물 ${piece.captureMoves}
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            ${specialText}
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            ${targetText}
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            ${qualityText}
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            ${reasonText}
-
-          </div>
-
-        </div>
-      `;
-
+    breaks: {
+      white: whiteBreaks,
+      black: blackBreaks
     }
-  ).join("");
+  };
+                   }
+/* =========================================================
+   POSITION SNAPSHOT
+   ========================================================= */
 
-}
+/*
+ * 현재 포지션에서 관찰할 수 있는 전략적 사실을
+ * 하나의 객체로 묶는다.
+ *
+ * 중요한 원칙:
+ *
+ * 이 단계에서는
+ * "백이 좋다 / 흑이 좋다"를 최종적으로 결정하지 않는다.
+ *
+ * 사실을 모으고,
+ * 나중 단계에서 dominant imbalance와
+ * fantasy position을 판단할 수 있도록 구조화한다.
+ */
 
-
-function renderSuperiorMinorPieceAnalysis(
-  minor
+function createPositionSnapshot(
+  chess
 ) {
+  const phase =
+    getGamePhase(chess);
 
-  const whiteActivity =
-    minor.white.averageActivity;
+  const material =
+    analyzeMaterial(chess);
 
+  const minorPieces =
+    analyzeMinorPieces(chess);
 
-  const blackActivity =
-    minor.black.averageActivity;
+  const pawnStructure =
+    analyzePawnStructure(chess);
 
+  return {
+    fen: chess.fen(),
 
-  const whiteQuality =
-    minor.white.averageQuality;
+    turn: chess.turn(),
 
+    moveNumber:
+      chess.moveNumber(),
 
-  const blackQuality =
-    minor.black.averageQuality;
+    phase,
 
+    material,
 
-  let comparisonText =
-    "현재는 어느 쪽이 확실히 우월한지 판단하기 어렵습니다.";
+    minorPieces,
 
+    pawnStructure,
 
-  let advantageText =
-    "뚜렷한 실전적 우세 후보 없음";
+    /*
+     * 아래 항목들은 다음 단계에서 확장한다.
+     */
+    weakSquares: null,
 
+    space: null,
 
-  if (
-    minor.advantage
-  ) {
+    center: null,
 
-    advantageText =
-      minor.advantage.label;
+    openFiles: null,
 
-  }
+    development: null,
 
+    initiative: null,
 
-  if (
-    minor.advantage &&
-    minor.advantage.reasons &&
-    minor.advantage.reasons.length
-  ) {
+    king: null,
 
-    comparisonText =
-      minor.advantage.reasons.join(" ");
+    dominantImbalance: null,
 
-  }
+    sideOfBoard: null,
 
+    counterplay: null,
 
-  const confidenceText = {
+    preventivePlan: null,
 
-    low:
-      "판단 신뢰도 낮음",
+    fantasyPosition: null,
 
-    medium:
-      "판단 신뢰도 중간",
-
-    high:
-      "판단 신뢰도 높음"
-
-  }[
-    minor.advantage?.confidence
-  ] || "판단 신뢰도 낮음";
-
-
-  const strongestWhite =
-    minor.white.strongest;
-
-
-  const strongestBlack =
-    minor.black.strongest;
-
-
-  const strongestText = [];
-
-
-  if (
-    strongestWhite
-  ) {
-
-    strongestText.push(
-      `백: ${strongestWhite.name} ${strongestWhite.square} (${strongestWhite.qualityScore})`
-    );
-
-  }
-
-
-  if (
-    strongestBlack
-  ) {
-
-    strongestText.push(
-      `흑: ${strongestBlack.name} ${strongestBlack.square} (${strongestBlack.qualityScore})`
-    );
-
-  }
-
-
-  return `
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        우세한 마이너 피스
-      </div>
-
-      <div class="analysis-row">
-        <span>백 마이너 피스 수</span>
-        <strong>
-          ${minor.white.pieces.length}
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>흑 마이너 피스 수</span>
-        <strong>
-          ${minor.black.pieces.length}
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>백 활동성 참고값</span>
-        <strong>
-          ${
-            whiteActivity === null
-              ? "-"
-              : whiteActivity
-          }
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>흑 활동성 참고값</span>
-        <strong>
-          ${
-            blackActivity === null
-              ? "-"
-              : blackActivity
-          }
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>백 실전적 가치 참고값</span>
-        <strong>
-          ${
-            whiteQuality === null
-              ? "-"
-              : whiteQuality
-          }
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>흑 실전적 가치 참고값</span>
-        <strong>
-          ${
-            blackQuality === null
-              ? "-"
-              : blackQuality
-          }
-        </strong>
-      </div>
-
-      <div class="analysis-description">
-
-        <strong>
-          ${advantageText}
-        </strong>
-
-      </div>
-
-      <div class="analysis-description">
-
-        ${comparisonText}
-
-      </div>
-
-      <div class="analysis-note">
-
-        ${confidenceText}
-
-      </div>
-
-      <div class="analysis-description">
-
-        <strong>가장 강한 마이너 피스 후보</strong><br>
-
-        ${
-          strongestText.length
-            ? strongestText.join(" · ")
-            : "비교할 마이너 피스가 없습니다."
-        }
-
-      </div>
-
-    </div>
-
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        백 마이너 피스
-      </div>
-
-      ${renderMinorPieceList(
-        minor.white.pieces
-      )}
-
-    </div>
-
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        흑 마이너 피스
-      </div>
-
-      ${renderMinorPieceList(
-        minor.black.pieces
-      )}
-
-    </div>
-
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        현재 단계의 해석
-      </div>
-
-      <div class="analysis-description">
-
-        이번 단계에서는 단순한 이동 가능 수만 비교하지 않습니다.
-
-        각 마이너 피스가 얼마나 안전하게 움직일 수 있는지,
-        실제로 어떤 상대 기물이나 폰에 접근할 수 있는지,
-        좋은 칸을 유지할 가능성이 있는지,
-        비숍의 대각선이 실제 대상과 연결되는지,
-        그리고 현재 폰 구조와 기물이 서로 잘 맞는지를
-        함께 확인합니다.
-
-      </div>
-
-      <div class="analysis-description">
-
-        따라서 활동성이 높은 기물이라고 해서
-        자동으로 우세한 마이너 피스로 판정하지 않습니다.
-
-        특히 비숍 페어 역시 자동으로 우세를 선언하지 않고,
-        실제 포지션에서 그 장점을 사용할 수 있는지를
-        이후 단계에서 다시 확인합니다.
-
-      </div>
-
-      <div class="analysis-note">
-
-        "활동성 참고값"과 "실전적 가치 참고값"은
-        ChessSense 내부 분석값이며 Stockfish 평가값이나
-        실제 승률이 아닙니다.
-
-        또한 이 단계의 "우세 후보"는 최종적인 포지션 평가가 아닙니다.
-        이후 공간, 주요 파일과 칸, 전개, 이니셔티브,
-        연결된 불균형 등을 함께 판단해야 합니다.
-
-      </div>
-
-    </div>
-
-  `;
-
+    candidates: []
+  };
 }
 
 
 /* =========================================================
-   Pawn Structure 화면
-========================================================= */
+   SNAPSHOT TEXT
+   ========================================================= */
 
-function pawnListText(
-  items
+function getMaterialText(
+  material
 ) {
-
-  if (
-    !items ||
-    !items.length
-  ) {
-
-    return "없음";
-
+  if (!material) {
+    return "물질 정보를 계산할 수 없습니다.";
   }
 
+  const difference =
+    material.difference;
 
-  return items.join(", ");
+  if (
+    Math.abs(difference) <
+    0.35
+  ) {
+    return "양쪽의 물질은 거의 균형입니다.";
+  }
 
+  if (difference > 0) {
+    return (
+      `백이 약 ${difference.toFixed(
+        1
+      )}점의 물질적 우세를 가지고 있습니다.`
+    );
+  }
+
+  return (
+    `흑이 약 ${Math.abs(
+      difference
+    ).toFixed(
+      1
+    )}점의 물질적 우세를 가지고 있습니다.`
+  );
 }
 
 
-function renderPawnSide(
-  side
+function getMinorPieceText(
+  minorPieces
 ) {
+  if (!minorPieces) {
+    return "기물 활동 정보를 계산할 수 없습니다.";
+  }
 
-  const doubledText =
-    side.doubled.length
-      ? side.doubled
-          .map(
-            (item) =>
-              `${item.file}-파일 (${item.pawns.join(", ")})`
-          )
-          .join(" / ")
-      : "없음";
+  const comparison =
+    minorPieces.comparison;
 
+  if (
+    comparison.favoredSide ===
+    "equal"
+  ) {
+    return (
+      "현재 비숍과 나이트의 활동성만으로는 명확한 우세를 확정하기 어렵습니다."
+    );
+  }
 
-  const chainText =
-    side.chains.length
-      ? side.chains
-          .map(
-            (chain) =>
-              `${chain.pawns.join("–")} (기초 ${chain.base}, 끝 ${chain.tip})`
-          )
-          .join(" / ")
-      : "없음";
+  const side =
+    comparison.favoredSide ===
+      "w"
+      ? "백"
+      : "흑";
 
+  const confidence =
+    Math.round(
+      comparison.confidence *
+        100
+    );
 
-  const breakText =
-    side.breaks.length
-      ? side.breaks
-          .map(
-            (item) =>
-              `${item.san} (${item.from}→${item.to})`
-          )
-          .join(", ")
-      : "없음";
-
-
-  const targetText =
-    side.targets.length
-      ? side.targets
-          .map(
-            (item) =>
-              `${item.square} ← ${item.attackers.join(", ")}`
-          )
-          .join(" / ")
-      : "없음";
+  return (
+    `${side} 쪽의 기물 활용 가능성이 우세 후보입니다. ` +
+    `현재 신뢰도는 약 ${confidence}%이며, ` +
+    `이는 엔진 점수가 아니라 ChessSense의 구조적 평가입니다.`
+  );
+}
 
 
-  return `
+function getPawnStructureText(
+  pawnStructure
+) {
+  if (!pawnStructure) {
+    return "폰 구조 정보를 계산할 수 없습니다.";
+  }
 
-    <div class="analysis-card">
+  const comparison =
+    pawnStructure.comparison;
 
-      <div class="analysis-card-title">
-        ${side.side} 폰 구조
-      </div>
+  const white =
+    pawnStructure.white;
 
-      <div class="analysis-row">
-        <span>폰 수</span>
-        <strong>
-          ${side.pawnCount}
-        </strong>
-      </div>
+  const black =
+    pawnStructure.black;
 
-      <div class="analysis-row">
-        <span>고립 폰 후보</span>
-        <strong>
-          ${pawnListText(side.isolated)}
-        </strong>
-      </div>
+  const facts = [];
 
-      <div class="analysis-row">
-        <span>더블 폰</span>
-        <strong>
-          ${doubledText}
-        </strong>
-      </div>
+  if (
+    white.isolatedPawns.length
+  ) {
+    facts.push(
+      `백 고립폰 ${white.isolatedPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>백워드 폰 후보</span>
-        <strong>
-          ${pawnListText(side.backward)}
-        </strong>
-      </div>
+  if (
+    black.isolatedPawns.length
+  ) {
+    facts.push(
+      `흑 고립폰 ${black.isolatedPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>연결된 폰</span>
-        <strong>
-          ${pawnListText(side.connected)}
-        </strong>
-      </div>
+  if (
+    white.doubledPawns.length
+  ) {
+    facts.push(
+      `백 더블폰 ${white.doubledPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>패스드 폰 후보</span>
-        <strong>
-          ${pawnListText(side.passed)}
-        </strong>
-      </div>
+  if (
+    black.doubledPawns.length
+  ) {
+    facts.push(
+      `흑 더블폰 ${black.doubledPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>보호된 패스드 폰 후보</span>
-        <strong>
-          ${pawnListText(side.protectedPassed)}
-        </strong>
-      </div>
+  if (
+    white.passedPawns.length
+  ) {
+    facts.push(
+      `백 패스폰 ${white.passedPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>폰 체인</span>
-        <strong>
-          ${chainText}
-        </strong>
-      </div>
+  if (
+    black.passedPawns.length
+  ) {
+    facts.push(
+      `흑 패스폰 ${black.passedPawns.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>폰 브레이크 후보</span>
-        <strong>
-          ${breakText}
-        </strong>
-      </div>
+  if (
+    white.pawnBreaks.length
+  ) {
+    facts.push(
+      `백 pawn break 후보 ${white.pawnBreaks.length}개`
+    );
+  }
 
-      <div class="analysis-row">
-        <span>공격 가능한 폰 후보</span>
-        <strong>
-          ${targetText}
-        </strong>
-      </div>
+  if (
+    black.pawnBreaks.length
+  ) {
+    facts.push(
+      `흑 pawn break 후보 ${black.pawnBreaks.length}개`
+    );
+  }
 
-    </div>
+  if (!facts.length) {
+    return (
+      "현재 포지션에서 뚜렷하게 잡히는 주요 폰 구조 신호가 많지 않습니다."
+    );
+  }
 
-  `;
+  return (
+    facts.join(" · ") +
+    "."
+  );
+}
 
+
+/* =========================================================
+   MINOR PIECE DETAIL TEXT
+   ========================================================= */
+
+function describeMinorPiece(
+  piece
+) {
+  const type =
+    piece.type === "n"
+      ? "나이트"
+      : "비숍";
+
+  const details = [];
+
+  details.push(
+    `${type} ${piece.square}`
+  );
+
+  details.push(
+    `이동 ${piece.mobility}`
+  );
+
+  details.push(
+    `안전한 이동 ${piece.safeMobility}`
+  );
+
+  if (
+    piece.type === "n" &&
+    piece.outpost?.detected
+  ) {
+    details.push(
+      piece.outpost.durable
+        ? "안정적 거점 후보"
+        : "거점 후보"
+    );
+  }
+
+  if (
+    piece.type === "b"
+  ) {
+    if (
+      piece.diagonal.openRaySquares >
+      0
+    ) {
+      details.push(
+        `열린 대각선 ${piece.diagonal.openRaySquares}`
+      );
+    }
+
+    if (
+      piece.diagonal.longDiagonalAccess >
+      0
+    ) {
+      details.push(
+        "장거리 대각선 접근 가능"
+      );
+    }
+  }
+
+  if (
+    piece.targetAccess?.length
+  ) {
+    details.push(
+      `직접 접근 대상 ${piece.targetAccess.length}`
+    );
+  }
+
+  return details.join(
+    " · "
+  );
+}
+
+
+function renderMinorPieceDetails(
+  minorPieces
+) {
+  const lines = [];
+
+  for (
+    const color of ["w", "b"]
+  ) {
+    const data =
+      minorPieces[color];
+
+    const name =
+      color === "w"
+        ? "백"
+        : "흑";
+
+    if (!data.pieces.length) {
+      lines.push(
+        `${name}: 남은 비숍/나이트 없음`
+      );
+      continue;
+    }
+
+    const pieces =
+      data.pieces.map(
+        describeMinorPiece
+      );
+
+    lines.push(
+      `${name}: ${pieces.join(
+        " / "
+      )}`
+    );
+  }
+
+  return lines;
+}
+
+
+/* =========================================================
+   PAWN DETAIL TEXT
+   ========================================================= */
+
+function describePawn(
+  pawn
+) {
+  const flags = [];
+
+  if (pawn.isolated) {
+    flags.push(
+      "고립"
+    );
+  }
+
+  if (pawn.doubled) {
+    flags.push(
+      "더블"
+    );
+  }
+
+  if (pawn.passed) {
+    flags.push(
+      pawn.protectedPassed
+        ? "보호된 패스폰"
+        : "패스폰"
+    );
+  }
+
+  if (
+    pawn.backwardCandidate
+  ) {
+    flags.push(
+      "후방 폰 후보"
+    );
+  }
+
+  if (
+    pawn.attackerCount > 0
+  ) {
+    flags.push(
+      `공격 ${pawn.attackerCount}`
+    );
+  }
+
+  if (
+    pawn.defenderCount > 0
+  ) {
+    flags.push(
+      `방어 ${pawn.defenderCount}`
+    );
+  }
+
+  if (!flags.length) {
+    flags.push(
+      "특이 구조 없음"
+    );
+  }
+
+  return `${pawn.square}: ${flags.join(
+    ", "
+  )}`;
 }
 
 
 function renderPawnDetails(
-  side
-) {
-
-  if (
-    !side.pawns.length
-  ) {
-
-    return `
-
-      <div class="analysis-note">
-        현재 이 진영에는 폰이 없습니다.
-      </div>
-
-    `;
-
-  }
-
-
-  return side.pawns.map(
-    (pawn) => {
-
-      const flags = [];
-
-
-      if (pawn.isDoubled) {
-
-        flags.push(
-          "더블 폰"
-        );
-
-      }
-
-
-      if (pawn.isIsolated) {
-
-        flags.push(
-          "고립 후보"
-        );
-
-      }
-
-
-      if (pawn.isBackwardCandidate) {
-
-        flags.push(
-          "백워드 후보"
-        );
-
-      }
-
-
-      if (pawn.isConnected) {
-
-        flags.push(
-          "연결 폰"
-        );
-
-      }
-
-
-      if (pawn.isPassed) {
-
-        flags.push(
-          "패스드 후보"
-        );
-
-      }
-
-
-      if (pawn.isProtectedPassed) {
-
-        flags.push(
-          "보호된 패스드 후보"
-        );
-
-      }
-
-
-      if (pawn.canAdvance) {
-
-        flags.push(
-          "전진 가능"
-        );
-
-      } else {
-
-        flags.push(
-          "즉시 전진 어려움"
-        );
-
-      }
-
-
-      const flagText =
-        flags.length
-          ? flags.join(" · ")
-          : "특별한 구조적 특징 없음";
-
-
-      const defenderText =
-        pawn.defenders.length
-          ? pawn.defenders.join(", ")
-          : "없음";
-
-
-      return `
-
-        <div class="minor-piece-item">
-
-          <div class="minor-piece-header">
-
-            <strong>
-              폰 ${pawn.square}
-            </strong>
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            ${flagText}
-
-          </div>
-
-          <div class="minor-piece-detail">
-
-            방어자:
-            ${defenderText}
-
-          </div>
-
-        </div>
-
-      `;
-
-    }
-  ).join("");
-
-}
-
-
-function renderPawnStructureAnalysis(
   pawnStructure
 ) {
+  const lines = [];
 
-  return `
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        폰 구조
-      </div>
-
-      <div class="analysis-description">
-
-        폰 구조는 현재 포지션에서 어떤 폰이
-        고정되어 있는지, 어떤 폰이 전진 가능한지,
-        어떤 파일과 폰 사슬이 계획의 기반이 될 수 있는지를
-        찾기 위한 기초 자료입니다.
-
-      </div>
-
-      <div class="analysis-note">
-
-        고립 폰·더블 폰·백워드 폰은
-        발견되었다고 해서 자동으로 약점이 아닙니다.
-        실제 공격 가능성, 방어 가능성, 기물의 접근,
-        폰 브레이크와 함께 판단해야 합니다.
-
-      </div>
-
-    </div>
-
-
-    ${renderPawnSide(
-      pawnStructure.white
-    )}
-
-
-    ${renderPawnSide(
-      pawnStructure.black
-    )}
-
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        백 폰 상세
-      </div>
-
-      ${renderPawnDetails(
-        pawnStructure.white
-      )}
-
-    </div>
-
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        흑 폰 상세
-      </div>
-
-      ${renderPawnDetails(
-        pawnStructure.black
-      )}
-
-    </div>
-
-  `;
-
-}
-
-
-/* =========================================================
-   Material 화면
-========================================================= */
-
-function renderMaterialAnalysis(
-  material
-) {
-
-  let description = "";
-
-
-  if (
-    material.advantage === "equal"
+  for (
+    const color of ["w", "b"]
   ) {
+    const data =
+      pawnStructure[color];
 
-    description =
-      "양쪽의 물질 가치가 거의 같습니다.";
+    const name =
+      color === "w"
+        ? "백"
+        : "흑";
 
-  } else if (
-    material.advantage === "white"
-  ) {
+    if (!data.pawns.length) {
+      lines.push(
+        `${name}: 폰 없음`
+      );
+      continue;
+    }
 
-    description =
-      `백이 물질적으로 +${formatScore(
-        material.difference
-      )}입니다.`;
+    const pawnText =
+      data.pawns.map(
+        describePawn
+      );
 
-  } else {
+    lines.push(
+      `${name}: ${pawnText.join(
+        " / "
+      )}`
+    );
 
-    description =
-      `흑이 물질적으로 +${formatScore(
-        Math.abs(
-          material.difference
-        )
-      )}입니다.`;
+    if (
+      data.pawnBreaks.length
+    ) {
+      const breaks =
+        data.pawnBreaks.map(
+          item =>
+            `${item.from}-${item.to}`
+        );
 
+      lines.push(
+        `${name} break 후보: ${breaks.join(
+          ", "
+        )}`
+      );
+    }
+
+    if (
+      data.chains.length
+    ) {
+      lines.push(
+        `${name} 폰 연결: ${data.chains.length}개`
+      );
+    }
   }
 
-
-  return `
-
-    <div class="analysis-card">
-
-      <div class="analysis-card-title">
-        물질
-      </div>
-
-      <div class="analysis-row">
-        <span>백</span>
-        <strong>
-          ${formatScore(
-            material.white.total
-          )}
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>흑</span>
-        <strong>
-          ${formatScore(
-            material.black.total
-          )}
-        </strong>
-      </div>
-
-      <div class="analysis-row">
-        <span>차이</span>
-        <strong>
-          ${formatScore(
-            material.difference
-          )}
-        </strong>
-      </div>
-
-      <div class="analysis-description">
-        ${description}
-      </div>
-
-      <div class="analysis-note">
-
-        현재 단계에서는 물질적 사실만 기록합니다.
-        실제 포지션의 유불리는 다른 불균형과 함께 판단합니다.
-
-      </div>
-
-    </div>
-
-  `;
-
+  return lines;
 }
 
 
 /* =========================================================
-   체스판
-========================================================= */
+   HUMAN FACTOR RENDERING
+   ========================================================= */
+
+function renderFactors(
+  snapshot
+) {
+  if (!els.humanFactors) {
+    return;
+  }
+
+  const materialText =
+    getMaterialText(
+      snapshot.material
+    );
+
+  const minorText =
+    getMinorPieceText(
+      snapshot.minorPieces
+    );
+
+  const pawnText =
+    getPawnStructureText(
+      snapshot.pawnStructure
+    );
+
+  const minorDetails =
+    renderMinorPieceDetails(
+      snapshot.minorPieces
+    );
+
+  const pawnDetails =
+    renderPawnDetails(
+      snapshot.pawnStructure
+    );
+
+  els.humanFactors.innerHTML = `
+    <div class="factor">
+      <div class="factorTitle">물질</div>
+      <div class="factorText">
+        ${escapeHtml(materialText)}
+      </div>
+    </div>
+
+    <div class="factor">
+      <div class="factorTitle">기물 활동</div>
+      <div class="factorText">
+        ${escapeHtml(minorText)}
+      </div>
+
+      <div class="factorDetail">
+        ${minorDetails
+          .map(
+            line =>
+              `<div>${escapeHtml(
+                line
+              )}</div>`
+          )
+          .join("")}
+      </div>
+    </div>
+
+    <div class="factor">
+      <div class="factorTitle">폰 구조</div>
+      <div class="factorText">
+        ${escapeHtml(pawnText)}
+      </div>
+
+      <div class="factorDetail">
+        ${pawnDetails
+          .map(
+            line =>
+              `<div>${escapeHtml(
+                line
+              )}</div>`
+          )
+          .join("")}
+      </div>
+    </div>
+
+    <div class="factor">
+      <div class="factorTitle">다음 단계</div>
+      <div class="factorText">
+        현재는 물질·기물 활동·폰 구조를 먼저
+        구조적으로 분석합니다.
+        공간, 주요 칸, 개발, 주도권은
+        다음 분석 단계에서 연결합니다.
+      </div>
+    </div>
+  `;
+}
+
+
+/* =========================================================
+   HTML ESCAPE
+   ========================================================= */
+
+function escapeHtml(
+  value
+) {
+  return String(
+    value ?? ""
+  )
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll(
+      "'",
+      "&#039;"
+    );
+}
+
+
+/* =========================================================
+   POSITION INSIGHT
+   ========================================================= */
+
+function renderPositionInsight(
+  snapshot
+) {
+  if (
+    !els.positionInsight
+  ) {
+    return;
+  }
+
+  const side =
+    snapshot.turn === "w"
+      ? "백"
+      : "흑";
+
+  const phaseText =
+    snapshot.phase ===
+      "opening"
+      ? "오프닝"
+      : snapshot.phase ===
+        "endgame"
+        ? "엔드게임"
+        : "미들게임";
+
+  const minor =
+    snapshot.minorPieces
+      ?.comparison;
+
+  const pawn =
+    snapshot.pawnStructure
+      ?.comparison;
+
+  const observations = [];
+
+  if (
+    minor &&
+    minor.favoredSide !==
+      "equal"
+  ) {
+    observations.push(
+      minor.explanation
+    );
+  }
+
+  if (
+    pawn &&
+    pawn.structuralDirection !==
+      "unclear"
+  ) {
+    observations.push(
+      pawn.explanation
+    );
+  }
+
+  if (!observations.length) {
+    observations.push(
+      "현재 단계에서는 뚜렷한 단일 전략 우세보다 여러 구조적 요소를 함께 확인해야 합니다."
+    );
+  }
+
+  els.positionInsight.innerHTML = `
+    <div class="insightMain">
+      ${escapeHtml(
+        `${phaseText} · ${side} 차례`
+      )}
+    </div>
+
+    <div class="insightText">
+      ${observations
+        .map(
+          item =>
+            `<div>${escapeHtml(
+              item
+            )}</div>`
+        )
+        .join("")}
+    </div>
+
+    <div class="insightNote">
+      이 설명은 엔진 평가값을 그대로 번역한 것이 아니라
+      현재 포지션에서 관찰한 구조적 신호입니다.
+    </div>
+  `;
+     }
+/* =========================================================
+   BOARD RENDERING
+   ========================================================= */
 
 const PIECE_SYMBOLS = {
-
   w: {
-
     k: "♔",
     q: "♕",
     r: "♖",
     b: "♗",
     n: "♘",
     p: "♙"
-
   },
-
   b: {
-
     k: "♚",
     q: "♛",
     r: "♜",
     b: "♝",
     n: "♞",
     p: "♟"
-
   }
-
 };
 
-
 function renderBoard(
-  snapshot
+  fen
 ) {
-
-  boardElement.innerHTML = "";
-
-
-  const boardGrid =
-    document.createElement(
-      "div"
-    );
-
-
-  boardGrid.className =
-    "chess-board";
-
-
-  const piecesBySquare = {};
-
-
-  for (
-    const piece of snapshot.board
-  ) {
-
-    piecesBySquare[
-      piece.square
-    ] = piece;
-
+  if (!els.board) {
+    return;
   }
 
+  let chess;
+
+  try {
+    chess = new Chess(fen);
+  } catch (error) {
+    return;
+  }
+
+  const board =
+    chess.board();
+
+  els.board.innerHTML = "";
 
   for (
-    let rank = 8;
-    rank >= 1;
-    rank--
+    let row = 0;
+    row < 8;
+    row++
   ) {
-
     for (
-      let fileIndex = 0;
-      fileIndex < 8;
-      fileIndex++
+      let col = 0;
+      col < 8;
+      col++
     ) {
-
-      const file =
-        String.fromCharCode(
-          97 + fileIndex
+      const square =
+        coordsToSquare(
+          col,
+          7 - row
         );
 
+      if (!square) continue;
 
-      const square =
-        `${file}${rank}`;
+      const piece =
+        board[row]?.[col];
 
-
-      const squareElement =
+      const cell =
         document.createElement(
           "div"
         );
 
+      cell.className =
+        `sq ${
+          (row + col) % 2 === 0
+            ? "light"
+            : "dark"
+        }`;
 
-      squareElement.className =
-        "chess-square";
-
-
-      const isLight =
-        (rank + fileIndex) % 2 === 0;
-
-
-      squareElement.classList.add(
-
-        isLight
-          ? "light-square"
-          : "dark-square"
-
-      );
-
-
-      const piece =
-        piecesBySquare[
-          square
-        ];
-
+      cell.dataset.square =
+        square;
 
       if (piece) {
+        cell.textContent =
+          PIECE_SYMBOLS[
+            piece.color
+          ][piece.type];
 
-        const pieceElement =
+        cell.classList.add(
+          piece.color === "w"
+            ? "whitePiece"
+            : "blackPiece"
+        );
+      }
+
+      /*
+       * rank / file 표시
+       */
+      if (col === 0) {
+        const rank =
           document.createElement(
             "span"
           );
 
+        rank.className =
+          "rankLabel";
 
-        pieceElement.className =
-          piece.color === "w"
-            ? "white-piece"
-            : "black-piece";
+        rank.textContent =
+          String(8 - row);
 
-
-        pieceElement.textContent =
-          PIECE_SYMBOLS[
-            piece.color
-          ][
-            piece.type
-          ];
-
-
-        squareElement.appendChild(
-          pieceElement
+        cell.appendChild(
+          rank
         );
-
       }
 
+      if (row === 7) {
+        const file =
+          document.createElement(
+            "span"
+          );
 
-      boardGrid.appendChild(
-        squareElement
+        file.className =
+          "fileLabel";
+
+        file.textContent =
+          String.fromCharCode(
+            "a".charCodeAt(0) +
+              col
+          );
+
+        cell.appendChild(
+          file
+        );
+      }
+
+      els.board.appendChild(
+        cell
       );
-
     }
-
   }
-
-
-  boardElement.appendChild(
-    boardGrid
-  );
-
 }
 
 
 /* =========================================================
-   Position Snapshot 화면
-========================================================= */
+   PGN POSITION BUILD
+   ========================================================= */
 
-function renderSnapshotSummary(
-  snapshot,
-  material
+function buildPositions(
+  chess
 ) {
-
-  const whitePieces =
-    snapshot.white.pieces.length;
-
-
-  const blackPieces =
-    snapshot.black.pieces.length;
-
-
-  const sideToMove =
-    snapshot.turn === "w"
-      ? "백"
-      : "흑";
-
-
-  analysisResult.innerHTML = `
-
-    ${renderMaterialAnalysis(
-      material
-    )}
-
-    ${renderSuperiorMinorPieceAnalysis(
-      snapshot.minorPieces
-    )}
-
-    ${renderPawnStructureAnalysis(
-      snapshot.pawnStructure
-    )}
-
-    <div class="snapshot-card">
-
-      <div class="snapshot-row">
-        <span>현재 차례</span>
-        <strong>
-          ${sideToMove}
-        </strong>
-      </div>
-
-      <div class="snapshot-row">
-        <span>백 기물 수</span>
-        <strong>
-          ${whitePieces}
-        </strong>
-      </div>
-
-      <div class="snapshot-row">
-        <span>흑 기물 수</span>
-        <strong>
-          ${blackPieces}
-        </strong>
-      </div>
-
-      <div class="snapshot-row">
-        <span>체크</span>
-        <strong>
-          ${
-            snapshot.inCheck
-              ? "있음"
-              : "없음"
-          }
-        </strong>
-      </div>
-
-      <div class="snapshot-note">
-
-        현재 단계에서는 체스판의 사실 관계,
-        물질 구조, 마이너 피스 활동성,
-        폰 구조와 마이너 피스의 실전적 가치를
-        수집합니다.
-
-        공간, 주요 파일과 칸, 전개, 이니셔티브에 대한
-        전략적 판단은 이후 단계에서 추가합니다.
-
-      </div>
-
-    </div>
-
-  `;
-
-}
-
-
-/* =========================================================
-   DEBUG
-========================================================= */
-
-function renderDebug(
-  snapshot,
-  material
-) {
-
-  /*
-     chess 객체 같은 비직렬화 정보는
-     DEBUG에서 제거한다.
-  */
-
-  function cleanMinorPiece(
-    piece
-  ) {
-
-    const {
-      chess,
-      ...cleaned
-    } = piece;
-
-
-    return cleaned;
-
-  }
-
-
-  const cleanMinorSide =
-    (side) => ({
-
-      pieces:
-        side.pieces.map(
-          cleanMinorPiece
-        ),
-
-      bishops:
-        side.bishops.map(
-          cleanMinorPiece
-        ),
-
-      knights:
-        side.knights.map(
-          cleanMinorPiece
-        ),
-
-      bishopCount:
-        side.bishopCount,
-
-      knightCount:
-        side.knightCount,
-
-      bishopPair:
-        side.bishopPair,
-
-      averageActivity:
-        side.averageActivity,
-
-      averageQuality:
-        side.averageQuality,
-
-      strongest:
-        side.strongest
-          ? cleanMinorPiece(
-              side.strongest
-            )
-          : null,
-
-      weakest:
-        side.weakest
-          ? cleanMinorPiece(
-              side.weakest
-            )
-          : null,
-
-      qualityReasons:
-        side.qualityReasons
-
+  const history =
+    chess.history({
+      verbose: true
     });
 
+  const initial =
+    new Chess();
 
-  const cleanMinor = {
-
-    type:
-      snapshot.minorPieces.type,
-
-    white:
-      cleanMinorSide(
-        snapshot.minorPieces.white
-      ),
-
-    black:
-      cleanMinorSide(
-        snapshot.minorPieces.black
-      ),
-
-    activityDifference:
-      snapshot.minorPieces
-        .activityDifference,
-
-    qualityDifference:
-      snapshot.minorPieces
-        .qualityDifference,
-
-    advantage:
-      snapshot.minorPieces
-        .advantage,
-
-    importance:
-      snapshot.minorPieces
-        .importance,
-
-    bishopPair:
-      snapshot.minorPieces
-        .bishopPair
-
-  };
-
-
-  const debugData = {
-
-    position: {
-
-      fen:
-        snapshot.fen,
-
-      turn:
-        colorName(
-          snapshot.turn
-        ),
-
-      fullmoveNumber:
-        snapshot.fullmoveNumber,
-
-      inCheck:
-        snapshot.inCheck
-
-    },
-
-
-    material: {
-
-      pieceValues:
-        PIECE_VALUES,
-
-      white:
-        material.white,
-
-      black:
-        material.black,
-
-      difference:
-        material.difference,
-
-      advantage:
-        material.advantage
-
-    },
-
-
-    superiorMinorPiece:
-      cleanMinor,
-
-
-    pawnStructure:
-      snapshot.pawnStructure,
-
-
-    white: {
-
-      materialCount:
-        snapshot.white.pieces.length,
-
-      material:
-        snapshot.white.material,
-
-      pieces:
-        snapshot.white.pieces
-
-    },
-
-
-    black: {
-
-      materialCount:
-        snapshot.black.pieces.length,
-
-      material:
-        snapshot.black.material,
-
-      pieces:
-        snapshot.black.pieces
-
+  const result = [
+    {
+      ply: 0,
+      fen: initial.fen(),
+      move: null
     }
+  ];
 
-  };
+  for (
+    let i = 0;
+    i < history.length;
+    i++
+  ) {
+    const move =
+      history[i];
 
+    initial.move({
+      from: move.from,
+      to: move.to,
+      promotion:
+        move.promotion
+    });
 
-  debugOutput.textContent =
-    JSON.stringify(
-      debugData,
-      null,
-      2
-    );
+    result.push({
+      ply: i + 1,
+      fen: initial.fen(),
+      move
+    });
+  }
 
+  return result;
 }
 
 
 /* =========================================================
-   PGN 분석
-========================================================= */
+   MOVE LIST
+   ========================================================= */
 
-function analyzePGN() {
-
-  const pgn =
-    pgnInput.value.trim();
-
-
-  if (!pgn) {
-
-    alert(
-      "먼저 PGN을 입력해주세요."
-    );
-
-    return;
-
+function formatMove(
+  move,
+  index
+) {
+  if (!move) {
+    return "";
   }
 
+  const moveNumber =
+    Math.floor(index / 2) + 1;
 
-  const chess =
-    new Chess();
+  if (index % 2 === 0) {
+    return `${moveNumber}. ${move.san}`;
+  }
+
+  return `${moveNumber}... ${move.san}`;
+}
 
 
-  try {
+function renderMoves() {
+  if (!els.moveList) {
+    return;
+  }
 
-    chess.loadPgn(
-      pgn
+  els.moveList.innerHTML = "";
+
+  if (positions.length <= 1) {
+    els.moveList.innerHTML =
+      `<div class="moveItem">아직 수가 없습니다.</div>`;
+
+    return;
+  }
+
+  for (
+    let i = 1;
+    i < positions.length;
+    i++
+  ) {
+    const position =
+      positions[i];
+
+    const item =
+      document.createElement(
+        "button"
+      );
+
+    item.type = "button";
+
+    item.className =
+      "moveItem";
+
+    if (
+      i === currentPly
+    ) {
+      item.classList.add(
+        "active"
+      );
+    }
+
+    item.textContent =
+      formatMove(
+        position.move,
+        i - 1
+      );
+
+    item.addEventListener(
+      "click",
+      () => {
+        selectPly(i);
+      }
     );
 
+    els.moveList.appendChild(
+      item
+    );
+  }
+}
 
-    const snapshot =
-      createPositionSnapshot(
+
+/* =========================================================
+   POSITION LABELS
+   ========================================================= */
+
+function renderPositionLabels(
+  ply
+) {
+  if (els.moveLabel) {
+    if (ply === 0) {
+      els.moveLabel.textContent =
+        "시작 포지션";
+    } else {
+      const move =
+        positions[ply]?.move;
+
+      els.moveLabel.textContent =
+        move
+          ? `${ply}수 · ${move.san}`
+          : `${ply}수`;
+    }
+  }
+
+  if (els.positionLabel) {
+    els.positionLabel.textContent =
+      `${ply} / ${
+        Math.max(
+          0,
+          positions.length - 1
+        )
+      }`;
+  }
+}
+
+
+/* =========================================================
+   GAME META
+   ========================================================= */
+
+function parsePgnHeaders(
+  text
+) {
+  const headers = {};
+
+  const regex =
+    /^\s*\[([A-Za-z0-9_]+)\s+"([^"]*)"\]\s*$/gm;
+
+  let match;
+
+  while (
+    (match = regex.exec(text))
+  ) {
+    headers[match[1]] =
+      match[2];
+  }
+
+  return headers;
+}
+
+
+function renderGameMeta(
+  headers
+) {
+  if (!els.gameMeta) {
+    return;
+  }
+
+  const event =
+    headers.Event ||
+    "ChessSense 분석";
+
+  const white =
+    headers.White ||
+    "White";
+
+  const black =
+    headers.Black ||
+    "Black";
+
+  const date =
+    headers.Date ||
+    "";
+
+  els.gameMeta.innerHTML = `
+    <div>
+      <strong>${escapeHtml(
+        event
+      )}</strong>
+    </div>
+
+    <div>
+      ${escapeHtml(
+        white
+      )}
+      -
+      ${escapeHtml(
+        black
+      )}
+    </div>
+
+    ${
+      date
+        ? `<div>${escapeHtml(
+            date
+          )}</div>`
+        : ""
+    }
+  `;
+}
+
+
+/* =========================================================
+   ENGINE CANDIDATE RENDER
+   ========================================================= */
+
+function getCandidateDescription(
+  line,
+  index
+) {
+  if (!line?.pv?.length) {
+    return "계속되는 엔진 계산 수가 없습니다.";
+  }
+
+  const firstMove =
+    line.pv[0];
+
+  if (index === 0) {
+    return (
+      "엔진이 현재 포지션에서 가장 높은 평가를 준 수입니다. " +
+      "ChessSense의 전략 판단과는 별도로 계산 결과를 표시합니다."
+    );
+  }
+
+  if (index === 1) {
+    return (
+      "엔진의 또 다른 주요 후보입니다. " +
+      "최선수와 비교해 전략적 차이를 확인할 수 있습니다."
+    );
+  }
+
+  return (
+    "엔진이 계산한 대안 후보입니다. " +
+    "단순히 최선수와 같다고 보지 않고 실제 계획과 함께 비교해야 합니다."
+  );
+}
+
+
+function renderCandidates(
+  result
+) {
+  if (!els.candidateList) {
+    return;
+  }
+
+  els.candidateList.innerHTML = "";
+
+  const lines =
+    result?.lines || [];
+
+  if (!lines.length) {
+    els.candidateList.innerHTML =
+      `<div class="candidate">
+        분석 결과가 없습니다.
+      </div>`;
+
+    return;
+  }
+
+  lines.forEach(
+    (line, index) => {
+      const candidate =
+        document.createElement(
+          "div"
+        );
+
+      candidate.className =
+        "candidate";
+
+      const top =
+        document.createElement(
+          "div"
+        );
+
+      top.className =
+        "candidateTop";
+
+      const score =
+        formatScore(
+          line.whiteScore
+        );
+
+      const move =
+        line.pv?.[0] ||
+        "—";
+
+      top.innerHTML = `
+        <strong>
+          ${escapeHtml(
+            move
+          )}
+        </strong>
+
+        <span>
+          ${escapeHtml(
+            score
+          )}
+        </span>
+      `;
+
+      const description =
+        document.createElement(
+          "div"
+        );
+
+      description.className =
+        "candidateText";
+
+      description.textContent =
+        getCandidateDescription(
+          line,
+          index
+        );
+
+      const pv =
+        document.createElement(
+          "div"
+        );
+
+      pv.className =
+        "candidatePv";
+
+      pv.textContent =
+        line.pv
+          ? line.pv
+              .slice(0, 8)
+              .join(" ")
+          : "";
+
+      candidate.appendChild(
+        top
+      );
+
+      candidate.appendChild(
+        description
+      );
+
+      if (pv.textContent) {
+        candidate.appendChild(
+          pv
+        );
+      }
+
+      els.candidateList.appendChild(
+        candidate
+      );
+    }
+  );
+}
+
+
+/* =========================================================
+   ENGINE EVALUATION UI
+   ========================================================= */
+
+function renderEngineEvaluation(
+  result
+) {
+  if (!result) {
+    return;
+  }
+
+  const first =
+    result.lines?.[0];
+
+  if (els.evalValue) {
+    els.evalValue.textContent =
+      first
+        ? formatScore(
+            first.whiteScore
+          )
+        : "—";
+  }
+
+  if (els.depthValue) {
+    els.depthValue.textContent =
+      String(
+        result.depth || "—"
+      );
+  }
+
+  renderProgress(
+    100,
+    result.depth || 0
+  );
+
+  renderCandidates(
+    result
+  );
+}
+
+
+/* =========================================================
+   HUMAN SUMMARY
+   ========================================================= */
+
+function renderSnapshot(
+  snapshot
+) {
+  renderFactors(
+    snapshot
+  );
+
+  renderPositionInsight(
+    snapshot
+  );
+}
+
+
+/* =========================================================
+   POSITION SELECTION
+   ========================================================= */
+
+async function selectPly(
+  ply
+) {
+  if (!positions.length) {
+    return;
+  }
+
+  const safePly =
+    Math.max(
+      0,
+      Math.min(
+        positions.length - 1,
+        ply
+      )
+    );
+
+  currentPly =
+    safePly;
+
+  const position =
+    positions[currentPly];
+
+  if (!position) {
+    return;
+  }
+
+  let chess;
+
+  try {
+    chess =
+      new Chess(
+        position.fen
+      );
+  } catch (error) {
+    showError(
+      "현재 포지션을 읽을 수 없습니다."
+    );
+    return;
+  }
+
+  clearError();
+
+  renderBoard(
+    position.fen
+  );
+
+  renderMoves();
+
+  renderPositionLabels(
+    currentPly
+  );
+
+  const snapshot =
+    createPositionSnapshot(
+      chess
+    );
+
+  renderSnapshot(
+    snapshot
+  );
+
+  /*
+   * 새 포지션을 선택하면 이전 엔진 계산은 취소한다.
+   */
+  cancelCurrentAnalysis();
+
+  renderProgress(
+    0,
+    0
+  );
+
+  if (els.evalValue) {
+    els.evalValue.textContent =
+      "분석 중…";
+  }
+
+  try {
+    await initEngine();
+
+    if (
+      currentPly !== safePly
+    ) {
+      return;
+    }
+
+    const result =
+      await analyzeFen(
+        position.fen,
+        10
+      );
+
+    if (
+      currentPly !== safePly
+    ) {
+      return;
+    }
+
+    renderEngineEvaluation(
+      result
+    );
+  } catch (error) {
+    if (
+      String(
+        error?.message || ""
+      ).includes(
+        "취소"
+      )
+    ) {
+      return;
+    }
+
+    console.error(error);
+
+    if (els.evalValue) {
+      els.evalValue.textContent =
+        "분석 실패";
+    }
+
+    showError(
+      `엔진 분석에 실패했습니다: ${
+        error?.message ||
+        "알 수 없는 오류"
+      }`
+    );
+  }
+}
+
+
+/* =========================================================
+   GAME START
+   ========================================================= */
+
+async function startGame() {
+  clearError();
+
+  const text =
+    els.pgnInput?.value?.trim();
+
+  if (!text) {
+    showError(
+      "PGN을 먼저 입력해주세요."
+    );
+    return;
+  }
+
+  cancelCurrentAnalysis();
+
+  if (els.analyzeBtn) {
+    els.analyzeBtn.disabled =
+      true;
+  }
+
+  try {
+    const chess =
+      new Chess();
+
+    chess.loadPgn(
+      text,
+      {
+        strict: false
+      }
+    );
+
+    if (
+      chess.history().length ===
+      0
+    ) {
+      throw new Error(
+        "PGN에서 수를 찾지 못했습니다."
+      );
+    }
+
+    positions =
+      buildPositions(
         chess
       );
 
+    currentPly = 0;
 
-    const material =
-      analyzeMaterial(
-        snapshot
+    currentAnalysis = null;
+
+    const headers =
+      parsePgnHeaders(
+        text
       );
 
-
-    renderBoard(
-      snapshot
+    renderGameMeta(
+      headers
     );
 
+    if (els.inputView) {
+      els.inputView.hidden =
+        true;
+    }
 
-    renderSnapshotSummary(
-      snapshot,
-      material
-    );
+    if (els.analysisView) {
+      els.analysisView.hidden =
+        false;
+    }
 
+    renderMoves();
 
-    renderDebug(
-      snapshot,
-      material
-    );
+    await initEngine();
 
-
+    await selectPly(0);
   } catch (error) {
+    console.error(error);
 
-    console.error(
-      error
+    showError(
+      `PGN을 읽지 못했습니다: ${
+        error?.message ||
+        "형식이 올바르지 않습니다."
+      }`
     );
-
-
-    analysisResult.innerHTML = `
-
-      <p class="error-message">
-
-        PGN을 읽지 못했습니다.
-        PGN 형식을 확인해주세요.
-
-      </p>
-
-    `;
-
-
-    debugOutput.textContent =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
+  } finally {
+    if (els.analyzeBtn) {
+      els.analyzeBtn.disabled =
+        false;
+    }
   }
-
 }
 
 
 /* =========================================================
-   예제 PGN
-========================================================= */
+   BACK TO INPUT
+   ========================================================= */
 
-exampleButton.addEventListener(
-  "click",
-  () => {
+function backToInput() {
+  cancelCurrentAnalysis();
 
-    pgnInput.value =
-      EXAMPLE_PGN;
+  positions = [];
 
+  currentPly = 0;
+
+  currentAnalysis = null;
+
+  if (els.analysisView) {
+    els.analysisView.hidden =
+      true;
+  }
+
+  if (els.inputView) {
+    els.inputView.hidden =
+      false;
+  }
+
+  clearError();
+
+  if (els.evalValue) {
+    els.evalValue.textContent =
+      "—";
+  }
+
+  if (els.depthValue) {
+    els.depthValue.textContent =
+      "—";
+  }
+
+  renderProgress(
+    0,
+    0
+  );
+}
+
+
+/* =========================================================
+   NAVIGATION BUTTONS
+   ========================================================= */
+
+function goFirst() {
+  if (!positions.length) {
+    return;
+  }
+
+  selectPly(0);
+}
+
+function goPrevious() {
+  if (!positions.length) {
+    return;
+  }
+
+  selectPly(
+    currentPly - 1
+  );
+}
+
+function goNext() {
+  if (!positions.length) {
+    return;
+  }
+
+  selectPly(
+    currentPly + 1
+  );
+}
+
+function goLast() {
+  if (!positions.length) {
+    return;
+  }
+
+  selectPly(
+    positions.length - 1
+  );
+}
+
+
+/* =========================================================
+   BUTTON EVENTS
+   ========================================================= */
+
+if (els.exampleBtn) {
+  els.exampleBtn.addEventListener(
+    "click",
+    () => {
+      if (els.pgnInput) {
+        els.pgnInput.value =
+          EXAMPLE;
+      }
+
+      clearError();
+    }
+  );
+}
+
+if (els.analyzeBtn) {
+  els.analyzeBtn.addEventListener(
+    "click",
+    () => {
+      startGame();
+    }
+  );
+}
+
+if (els.backBtn) {
+  els.backBtn.addEventListener(
+    "click",
+    () => {
+      backToInput();
+    }
+  );
+}
+
+if (els.firstBtn) {
+  els.firstBtn.addEventListener(
+    "click",
+    () => {
+      goFirst();
+    }
+  );
+}
+
+if (els.prevBtn) {
+  els.prevBtn.addEventListener(
+    "click",
+    () => {
+      goPrevious();
+    }
+  );
+}
+
+if (els.nextBtn) {
+  els.nextBtn.addEventListener(
+    "click",
+    () => {
+      goNext();
+    }
+  );
+}
+
+if (els.lastBtn) {
+  els.lastBtn.addEventListener(
+    "click",
+    () => {
+      goLast();
+    }
+  );
+}
+
+
+/* =========================================================
+   INITIAL STATE
+   ========================================================= */
+
+if (els.analysisView) {
+  els.analysisView.hidden =
+    true;
+}
+
+if (els.inputView) {
+  els.inputView.hidden =
+    false;
+}
+
+if (els.pgnInput) {
+  els.pgnInput.value =
+    "";
+}
+
+setStatus(
+  "Stockfish 준비 중…",
+  "loading"
+);
+
+renderProgress(
+  0,
+  0
+);
+
+
+/*
+ * 앱을 열었을 때 Stockfish를 미리 준비한다.
+ *
+ * 실패하더라도 페이지 자체가 죽지 않도록
+ * catch 처리한다.
+ */
+initEngine().catch(
+  error => {
+    console.error(
+      "Engine initialization failed:",
+      error
+    );
+
+    setStatus(
+      "Stockfish 준비 실패",
+      "error"
+    );
   }
 );
-
-
-/* =========================================================
-   분석 시작
-========================================================= */
-
-analyzeButton.addEventListener(
-  "click",
-  analyzePGN
-);
-
-
-/* =========================================================
-   초기 상태
-========================================================= */
-
-pgnInput.value =
-  EXAMPLE_PGN;
-
-
-analysisResult.innerHTML = `
-
-  <p class="empty-message">
-
-    예제 PGN이 준비되어 있습니다.
-    "게임 분석 시작"을 눌러보세요.
-
-  </p>
-
-`;
