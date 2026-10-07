@@ -63,13 +63,6 @@ function colorName(color) {
 
 /* =========================================================
    기물 가치
-=========================================================
-
-   주의:
-   이 값은 Stockfish 평가값이 아니다.
-
-   ChessSense 내부에서 물질 구조를 비교하기 위한
-   분석용 기준값이다.
 ========================================================= */
 
 const PIECE_VALUES = {
@@ -136,7 +129,9 @@ function createPositionSnapshot(chess) {
 
     board: [],
 
-    minorPieces: null
+    minorPieces: null,
+
+    pawnStructure: null
 
   };
 
@@ -220,15 +215,21 @@ function createPositionSnapshot(chess) {
 
   /*
     ② Superior Minor Piece
-
-    현재 Position Snapshot 단계에서
-    비숍 / 나이트의 실제 활동성 정보를 수집한다.
-
-    여기서는 최종적인 우세 판정을 하지 않는다.
   */
 
   snapshot.minorPieces =
     analyzeSuperiorMinorPieces(
+      chess,
+      snapshot
+    );
+
+
+  /*
+    ③ Pawn Structure
+  */
+
+  snapshot.pawnStructure =
+    analyzePawnStructure(
       chess,
       snapshot
     );
@@ -239,7 +240,7 @@ function createPositionSnapshot(chess) {
 
 
 /* =========================================================
-   ① Material Analyzer
+   Material Analyzer
 ========================================================= */
 
 function analyzeMaterial(snapshot) {
@@ -440,13 +441,6 @@ function getBoardPiece(board, square) {
 
 /* =========================================================
    특정 칸이 특정 색에게 공격받고 있는지
-=========================================================
-
-   chess.js의 별도 공격 API에 의존하지 않고
-   ChessSense가 직접 공격 관계를 계산한다.
-
-   이것은 "안전한 이동 가능성"을 평가하기 위한
-   내부 분석용 함수다.
 ========================================================= */
 
 function isSquareAttackedBy(
@@ -744,11 +738,6 @@ function isSquareAttackedBy(
 
 /* =========================================================
    중앙성
-=========================================================
-
-   중앙에 가까운 정도를 내부 참고값으로 계산한다.
-
-   이것만으로 기물의 우열을 판단하지 않는다.
 ========================================================= */
 
 function calculateCentrality(square) {
@@ -794,11 +783,6 @@ function isKnightOutpost(
   } = squareToCoords(square);
 
 
-  /*
-     너무 가장자리인 칸은
-     일반적인 아웃포스트 후보에서 제외한다.
-  */
-
   if (
     file === 0 ||
     file === 7
@@ -808,12 +792,6 @@ function isKnightOutpost(
 
   }
 
-
-  /*
-     백 나이트는 흑 진영 쪽,
-     흑 나이트는 백 진영 쪽으로
-     진입한 경우를 우선 후보로 본다.
-  */
 
   if (
     color === "w" &&
@@ -835,10 +813,6 @@ function isKnightOutpost(
   }
 
 
-  /*
-     상대 폰에게 공격받는지 확인한다.
-  */
-
   const board =
     chess.board();
 
@@ -854,15 +828,6 @@ function isKnightOutpost(
       enemy
     )
   ) {
-
-    /*
-       여기에는 상대 나이트나 다른 기물의 공격도
-       포함되므로 실제 '폰으로 쫓아낼 수 없는'
-       전형적인 아웃포스트보다 엄격하다.
-
-       따라서 이 단계에서는
-       "아웃포스트 후보" 정도로만 기록한다.
-    */
 
     return false;
 
@@ -978,11 +943,6 @@ function analyzeBishopDiagonals(
 
 
       if (targetPiece) {
-
-        /*
-           적 기물이 있으면 그 칸까지는
-           비숍의 영향 범위에 포함한다.
-        */
 
         if (
           targetPiece.color !==
@@ -1120,14 +1080,6 @@ function analyzeMinorPiece(
     }
 
 
-    /*
-       실제 이동 후의 보드에서
-       목적지가 공격받는지 확인한다.
-
-       원래 포지션의 공격 여부만 보는 것보다
-       실제 이동 이후를 확인하는 것이 중요하다.
-    */
-
     try {
 
       const testChess =
@@ -1168,8 +1120,8 @@ function analyzeMinorPiece(
     } catch (error) {
 
       /*
-         특정 이동의 안전성 계산이 실패하더라도
-         전체 분석은 계속한다.
+         안전성 계산 실패는
+         전체 분석을 중단시키지 않는다.
       */
 
     }
@@ -1223,24 +1175,8 @@ function analyzeMinorPiece(
   }
 
 
-  /*
-     내부 활동성 점수
-
-     중요:
-     이 값은 Stockfish 평가값이 아니다.
-     또한 "비숍/나이트 우열"을 의미하지 않는다.
-
-     현재 단계에서
-     활동성의 여러 요소를 하나의 참고값으로
-     묶어 놓은 것이다.
-  */
-
   let activityScore = 0;
 
-
-  /*
-     기본 이동성
-  */
 
   activityScore +=
     Math.min(
@@ -1249,10 +1185,6 @@ function analyzeMinorPiece(
     ) * 4;
 
 
-  /*
-     안전한 이동성
-  */
-
   activityScore +=
     Math.min(
       safeMoves,
@@ -1260,17 +1192,9 @@ function analyzeMinorPiece(
     ) * 4;
 
 
-  /*
-     중앙 접근
-  */
-
   activityScore +=
     centrality * 15;
 
-
-  /*
-     잡을 수 있는 기물에 접근
-  */
 
   activityScore +=
     Math.min(
@@ -1279,20 +1203,12 @@ function analyzeMinorPiece(
     ) * 5;
 
 
-  /*
-     나이트 아웃포스트 후보
-  */
-
   if (outpostCandidate) {
 
     activityScore += 10;
 
   }
 
-
-  /*
-     비숍의 긴 대각선 접근
-  */
 
   if (bishopInfo) {
 
@@ -1356,26 +1272,6 @@ function analyzeMinorPiece(
 
 /* =========================================================
    ② Superior Minor Piece Analyzer
-=========================================================
-
-   목적:
-
-   "비숍이 좋다 / 나이트가 좋다"를 즉시 선언하는 것이
-   아니다.
-
-   먼저 실제 포지션에서 각 마이너 피스가
-
-   - 얼마나 움직일 수 있는가
-   - 안전한 이동 칸이 얼마나 있는가
-   - 중앙에 접근할 수 있는가
-   - 상대 기물/폰에 접근할 수 있는가
-   - 나이트가 아웃포스트 후보를 가지고 있는가
-   - 비숍이 대각선을 얼마나 활용하는가
-
-   를 기록한다.
-
-   이것이 이후 "Superior Minor Piece" 판단의
-   기초 데이터가 된다.
 ========================================================= */
 
 function analyzeSuperiorMinorPieces(
@@ -1557,8 +1453,1780 @@ function analyzeSuperiorMinorPieces(
 
     activityDifference,
 
+    advantage:
+      "undetermined",
+
+    importance: 0
+
+  };
+
+}
+
+
+/* =========================================================
+   ③ Pawn Structure
+=========================================================
+
+   여기서는 폰 구조의 "사실"을 수집한다.
+
+   중요:
+   고립 폰 = 무조건 약점
+   더블 폰 = 무조건 약점
+   패스드 폰 = 무조건 강점
+
+   으로 판단하지 않는다.
+
+   실제 약점/강점 여부는 이후
+   공격 가능성, 방어 가능성, 활동성,
+   공간, 열린 파일, 계획과 함께 판단한다.
+========================================================= */
+
+
+/* ---------------------------------------------------------
+   폰 정보 가져오기
+--------------------------------------------------------- */
+
+function getPawnsByColor(
+  snapshot,
+  color
+) {
+
+  return (
+    color === "w"
+      ? snapshot.white.pawns
+      : snapshot.black.pawns
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   같은 파일의 폰
+--------------------------------------------------------- */
+
+function getPawnsOnFile(
+  pawns,
+  file
+) {
+
+  return pawns.filter(
+    (pawn) =>
+      pawn.square[0] === file
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   인접 파일
+--------------------------------------------------------- */
+
+function adjacentFiles(file) {
+
+  const index =
+    file.charCodeAt(0) - 97;
+
+
+  const result = [];
+
+
+  if (index > 0) {
+
+    result.push(
+      String.fromCharCode(
+        97 + index - 1
+      )
+    );
+
+  }
+
+
+  if (index < 7) {
+
+    result.push(
+      String.fromCharCode(
+        97 + index + 1
+      )
+    );
+
+  }
+
+
+  return result;
+
+}
+
+
+/* ---------------------------------------------------------
+   상대 폰이 전진 방향에 존재하는지
+--------------------------------------------------------- */
+
+function enemyPawnAhead(
+  snapshot,
+  pawn,
+  color
+) {
+
+  const enemy =
+    oppositeColor(color);
+
+
+  const enemyPawns =
+    getPawnsByColor(
+      snapshot,
+      enemy
+    );
+
+
+  const {
+    file,
+    rank
+  } = squareToCoords(
+    pawn.square
+  );
+
+
+  for (
+    const enemyPawn of enemyPawns
+  ) {
+
+    const enemyCoords =
+      squareToCoords(
+        enemyPawn.square
+      );
+
+
     /*
-       아직 실제 우세 판정을 하지 않는다.
+       같은 파일 또는 인접 파일에서
+       해당 폰보다 앞에 있는 상대 폰.
+    */
+
+    if (
+      Math.abs(
+        enemyCoords.file - file
+      ) > 1
+    ) {
+
+      continue;
+
+    }
+
+
+    if (color === "w") {
+
+      if (
+        enemyCoords.rank > rank
+      ) {
+
+        return true;
+
+      }
+
+    } else {
+
+      if (
+        enemyCoords.rank < rank
+      ) {
+
+        return true;
+
+      }
+
+    }
+
+  }
+
+
+  return false;
+}
+
+
+/* ---------------------------------------------------------
+   상대 폰이 같은 파일에 존재하는지
+--------------------------------------------------------- */
+
+function enemyPawnOnSameFile(
+  snapshot,
+  pawn,
+  color
+) {
+
+  const enemy =
+    oppositeColor(color);
+
+
+  const enemyPawns =
+    getPawnsByColor(
+      snapshot,
+      enemy
+    );
+
+
+  return enemyPawns.some(
+    (enemyPawn) =>
+      enemyPawn.square[0] ===
+      pawn.square[0]
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   패스드 폰
+---------------------------------------------------------
+
+   같은 파일 또는 인접 파일에
+   앞으로 나아갈 상대 폰이 없으면
+   패스드 폰 후보로 기록한다.
+--------------------------------------------------------- */
+
+function isPassedPawn(
+  snapshot,
+  pawn,
+  color
+) {
+
+  return !enemyPawnAhead(
+    snapshot,
+    pawn,
+    color
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   연결된 폰
+--------------------------------------------------------- */
+
+function isConnectedPawn(
+  pawns,
+  pawn
+) {
+
+  const fileIndex =
+    pawn.square.charCodeAt(0) - 97;
+
+
+  const rank =
+    Number(
+      pawn.square[1]
+    );
+
+
+  return pawns.some(
+    (other) => {
+
+      if (
+        other.square ===
+        pawn.square
+      ) {
+
+        return false;
+
+      }
+
+
+      const otherFile =
+        other.square.charCodeAt(0) - 97;
+
+
+      const otherRank =
+        Number(
+          other.square[1]
+        );
+
+
+      return (
+        Math.abs(
+          otherFile - fileIndex
+        ) === 1 &&
+        otherRank === rank
+      );
+
+    }
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   보호된 패스드 폰
+---------------------------------------------------------
+
+   같은 진영의 폰이 옆에서
+   해당 폰을 방어하는 형태인지 확인한다.
+--------------------------------------------------------- */
+
+function isProtectedPassedPawn(
+  pawns,
+  pawn,
+  color
+) {
+
+  if (
+    !isPassedPawn(
+      currentPawnSnapshot,
+      pawn,
+      color
+    )
+  ) {
+
+    return false;
+
+  }
+
+
+  const fileIndex =
+    pawn.square.charCodeAt(0) - 97;
+
+
+  const rank =
+    Number(
+      pawn.square[1]
+    );
+
+
+  return pawns.some(
+    (other) => {
+
+      if (
+        other.square ===
+        pawn.square
+      ) {
+
+        return false;
+
+      }
+
+
+      const otherFile =
+        other.square.charCodeAt(0) - 97;
+
+
+      const otherRank =
+        Number(
+          other.square[1]
+        );
+
+
+      return (
+        Math.abs(
+          otherFile - fileIndex
+        ) === 1 &&
+        (
+          otherRank === rank - 1 ||
+          otherRank === rank + 1
+        )
+      );
+
+    }
+  );
+
+}
+
+
+/* =========================================================
+   현재 Pawn Snapshot
+========================================================= */
+
+let currentPawnSnapshot = null;
+
+
+/* ---------------------------------------------------------
+   폰 전진 가능성
+--------------------------------------------------------- */
+
+function canPawnAdvance(
+  chess,
+  pawn
+) {
+
+  try {
+
+    const moves =
+      chess.moves({
+
+        square:
+          pawn.square,
+
+        verbose: true
+
+      });
+
+
+    return moves.some(
+      (move) =>
+        move.to[0] ===
+        pawn.square[0]
+    );
+
+  } catch (error) {
+
+    return false;
+
+  }
+
+}
+
+
+/* ---------------------------------------------------------
+   폰 방어자
+---------------------------------------------------------
+
+   해당 폰을 같은 진영 기물이
+   공격 관계상 방어하고 있는지 기록한다.
+--------------------------------------------------------- */
+
+function findPawnDefenders(
+  chess,
+  pawn
+) {
+
+  const color =
+    pawn.color;
+
+
+  const board =
+    chess.board();
+
+
+  const defenders = [];
+
+
+  for (
+    const piece of (
+      color === "w"
+        ? currentPawnSnapshot.white.pieces
+        : currentPawnSnapshot.black.pieces
+    )
+  ) {
+
+    if (
+      piece.square ===
+      pawn.square
+    ) {
+
+      continue;
+
+    }
+
+
+    if (
+      isPieceAttackingSquare(
+        board,
+        piece.square,
+        pawn.square,
+        color
+      )
+    ) {
+
+      defenders.push(
+        piece.square
+      );
+
+    }
+
+  }
+
+
+  return defenders;
+
+}
+
+
+/* ---------------------------------------------------------
+   기물이 특정 칸을 공격하는지
+--------------------------------------------------------- */
+
+function isPieceAttackingSquare(
+  board,
+  fromSquare,
+  targetSquare,
+  color
+) {
+
+  const piece =
+    getBoardPiece(
+      board,
+      fromSquare
+    );
+
+
+  if (
+    !piece ||
+    piece.color !== color
+  ) {
+
+    return false;
+
+  }
+
+
+  const from =
+    squareToCoords(
+      fromSquare
+    );
+
+
+  const target =
+    squareToCoords(
+      targetSquare
+    );
+
+
+  const df =
+    target.file -
+    from.file;
+
+
+  const dr =
+    target.rank -
+    from.rank;
+
+
+  /*
+     폰
+  */
+
+  if (
+    piece.type === "p"
+  ) {
+
+    const direction =
+      color === "w"
+        ? 1
+        : -1;
+
+
+    return (
+      dr === direction &&
+      Math.abs(df) === 1
+    );
+
+  }
+
+
+  /*
+     나이트
+  */
+
+  if (
+    piece.type === "n"
+  ) {
+
+    return (
+      (
+        Math.abs(df) === 1 &&
+        Math.abs(dr) === 2
+      ) ||
+      (
+        Math.abs(df) === 2 &&
+        Math.abs(dr) === 1
+      )
+    );
+
+  }
+
+
+  /*
+     킹
+  */
+
+  if (
+    piece.type === "k"
+  ) {
+
+    return (
+      Math.abs(df) <= 1 &&
+      Math.abs(dr) <= 1 &&
+      !(df === 0 && dr === 0)
+    );
+
+  }
+
+
+  /*
+     룩 / 퀸 직선
+  */
+
+  if (
+    piece.type === "r" ||
+    piece.type === "q"
+  ) {
+
+    if (
+      df !== 0 &&
+      dr !== 0
+    ) {
+
+      /*
+         퀸은 아래 대각선 검사에서
+         다시 처리한다.
+      */
+
+    } else {
+
+      const stepFile =
+        Math.sign(df);
+
+
+      const stepRank =
+        Math.sign(dr);
+
+
+      let file =
+        from.file +
+        stepFile;
+
+
+      let rank =
+        from.rank +
+        stepRank;
+
+
+      while (
+        file !== target.file ||
+        rank !== target.rank
+      ) {
+
+        const square =
+          coordsToSquare(
+            file,
+            rank
+          );
+
+
+        if (
+          getBoardPiece(
+            board,
+            square
+          )
+        ) {
+
+          return false;
+
+        }
+
+
+        file += stepFile;
+        rank += stepRank;
+
+      }
+
+
+      return true;
+
+    }
+
+  }
+
+
+  /*
+     비숍 / 퀸 대각선
+  */
+
+  if (
+    piece.type === "b" ||
+    piece.type === "q"
+  ) {
+
+    if (
+      Math.abs(df) !==
+      Math.abs(dr)
+    ) {
+
+      return false;
+
+    }
+
+
+    const stepFile =
+      Math.sign(df);
+
+
+    const stepRank =
+      Math.sign(dr);
+
+
+    let file =
+      from.file +
+      stepFile;
+
+
+    let rank =
+      from.rank +
+      stepRank;
+
+
+    while (
+      file !== target.file ||
+      rank !== target.rank
+    ) {
+
+      const square =
+        coordsToSquare(
+          file,
+          rank
+        );
+
+
+      if (
+        getBoardPiece(
+          board,
+          square
+        )
+      ) {
+
+        return false;
+
+      }
+
+
+      file += stepFile;
+      rank += stepRank;
+
+    }
+
+
+    return true;
+
+  }
+
+
+  return false;
+}
+
+
+/* ---------------------------------------------------------
+   폰 브레이크 후보
+---------------------------------------------------------
+
+   현재 폰 구조에서 상대 폰과 접촉하거나
+   구조를 바꿀 수 있는 전진/캡처 가능성을 기록한다.
+--------------------------------------------------------- */
+
+function findPawnBreaks(
+  chess,
+  snapshot,
+  color
+) {
+
+  const pawns =
+    getPawnsByColor(
+      snapshot,
+      color
+    );
+
+
+  const breaks = [];
+
+
+  for (
+    const pawn of pawns
+  ) {
+
+    const moves =
+      chess.moves({
+
+        square:
+          pawn.square,
+
+        verbose: true
+
+      });
+
+
+    for (
+      const move of moves
+    ) {
+
+      if (
+        move.captured === "p"
+      ) {
+
+        breaks.push({
+
+          from:
+            move.from,
+
+          to:
+            move.to,
+
+          type:
+            "capture",
+
+          san:
+            move.san
+
+        });
+
+      }
+
+    }
+
+
+    /*
+       전진 후 상대 폰과 접촉할 가능성이 있는
+       단순 전진도 기록한다.
+    */
+
+    for (
+      const move of moves
+    ) {
+
+      if (
+        move.captured
+      ) {
+
+        continue;
+
+      }
+
+
+      if (
+        move.to[0] ===
+        pawn.square[0]
+      ) {
+
+        const targetRank =
+          Number(
+            move.to[1]
+          );
+
+
+        const enemy =
+          oppositeColor(color);
+
+
+        const enemyPawns =
+          getPawnsByColor(
+            snapshot,
+            enemy
+          );
+
+
+        const createsContact =
+          enemyPawns.some(
+            (enemyPawn) => {
+
+              const ef =
+                enemyPawn.square
+                  .charCodeAt(0) - 97;
+
+
+              const tf =
+                move.to
+                  .charCodeAt(0) - 97;
+
+
+              const er =
+                Number(
+                  enemyPawn.square[1]
+                );
+
+
+              return (
+                Math.abs(
+                  ef - tf
+                ) <= 1 &&
+                Math.abs(
+                  er - targetRank
+                ) <= 1
+              );
+
+            }
+          );
+
+
+        if (
+          createsContact
+        ) {
+
+          breaks.push({
+
+            from:
+              move.from,
+
+            to:
+              move.to,
+
+            type:
+              "advance",
+
+            san:
+              move.san
+
+          });
+
+        }
+
+      }
+
+    }
+
+  }
+
+
+  return breaks;
+}
+
+
+/* ---------------------------------------------------------
+   폰 타깃 후보
+---------------------------------------------------------
+
+   단순히 고립/더블/백워드라는 이유만으로
+   약점이라고 하지 않는다.
+
+   여기서는 상대 기물이 실제로 접근하거나
+   공격할 수 있는 폰을 후보로 기록한다.
+--------------------------------------------------------- */
+
+function findPawnTargets(
+  chess,
+  snapshot,
+  color
+) {
+
+  const pawns =
+    getPawnsByColor(
+      snapshot,
+      color
+    );
+
+
+  const enemy =
+    oppositeColor(color);
+
+
+  const enemyPieces =
+    enemy === "w"
+      ? snapshot.white.pieces
+      : snapshot.black.pieces;
+
+
+  const targets = [];
+
+
+  for (
+    const pawn of pawns
+  ) {
+
+    const attackers = [];
+
+
+    for (
+      const piece of enemyPieces
+    ) {
+
+      if (
+        isPieceAttackingSquare(
+          chess.board(),
+          piece.square,
+          pawn.square,
+          enemy
+        )
+      ) {
+
+        attackers.push(
+          piece.square
+        );
+
+      }
+
+    }
+
+
+    if (
+      attackers.length > 0
+    ) {
+
+      targets.push({
+
+        square:
+          pawn.square,
+
+        attackers
+
+      });
+
+    }
+
+  }
+
+
+  return targets;
+}
+
+
+/* ---------------------------------------------------------
+   백워드 폰 후보
+---------------------------------------------------------
+
+   구현상 보수적으로 판단한다.
+
+   뒤에 있는 폰이 인접 파일의 자기 폰보다
+   전진이 뒤처져 있고,
+   앞으로 나아갈 때 상대 폰 구조와 충돌하는 경우
+   후보로 기록한다.
+
+   이것 역시 최종 약점 판정이 아니다.
+--------------------------------------------------------- */
+
+function isBackwardPawnCandidate(
+  snapshot,
+  pawn,
+  color
+) {
+
+  const pawns =
+    getPawnsByColor(
+      snapshot,
+      color
+    );
+
+
+  const fileIndex =
+    pawn.square.charCodeAt(0) - 97;
+
+
+  const rank =
+    Number(
+      pawn.square[1]
+    );
+
+
+  const adjacent =
+    pawns.filter(
+      (other) => {
+
+        if (
+          other.square ===
+          pawn.square
+        ) {
+
+          return false;
+
+        }
+
+
+        const otherFile =
+          other.square.charCodeAt(0) - 97;
+
+
+        return (
+          Math.abs(
+            otherFile -
+            fileIndex
+          ) === 1
+        );
+
+      }
+    );
+
+
+  if (!adjacent.length) {
+
+    return false;
+
+  }
+
+
+  if (color === "w") {
+
+    const moreAdvancedNeighbor =
+      adjacent.some(
+        (other) =>
+          Number(
+            other.square[1]
+          ) > rank
+      );
+
+
+    if (
+      !moreAdvancedNeighbor
+    ) {
+
+      return false;
+
+    }
+
+  } else {
+
+    const moreAdvancedNeighbor =
+      adjacent.some(
+        (other) =>
+          Number(
+            other.square[1]
+          ) < rank
+      );
+
+
+    if (
+      !moreAdvancedNeighbor
+    ) {
+
+      return false;
+
+    }
+
+  }
+
+
+  /*
+     상대 폰이 앞에 있거나
+     해당 폰의 전진이 구조적으로 제한되면
+     백워드 후보로 기록한다.
+  */
+
+  return enemyPawnAhead(
+    snapshot,
+    pawn,
+    color
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   폰 체인
+--------------------------------------------------------- */
+
+function findPawnChains(
+  pawns,
+  color
+) {
+
+  const chains = [];
+
+  const visited =
+    new Set();
+
+
+  function pawnKey(pawn) {
+
+    return pawn.square;
+
+  }
+
+
+  for (
+    const startPawn of pawns
+  ) {
+
+    if (
+      visited.has(
+        pawnKey(startPawn)
+      )
+    ) {
+
+      continue;
+
+    }
+
+
+    const chain = [];
+
+
+    const queue = [
+      startPawn
+    ];
+
+
+    while (
+      queue.length
+    ) {
+
+      const pawn =
+        queue.shift();
+
+
+      const key =
+        pawnKey(pawn);
+
+
+      if (
+        visited.has(key)
+      ) {
+
+        continue;
+
+      }
+
+
+      visited.add(key);
+
+      chain.push(
+        pawn.square
+      );
+
+
+      const fileIndex =
+        pawn.square
+          .charCodeAt(0) - 97;
+
+
+      const rank =
+        Number(
+          pawn.square[1]
+        );
+
+
+      for (
+        const other of pawns
+      ) {
+
+        if (
+          visited.has(
+            pawnKey(other)
+          )
+        ) {
+
+          continue;
+
+        }
+
+
+        const otherFile =
+          other.square
+            .charCodeAt(0) - 97;
+
+
+        const otherRank =
+          Number(
+            other.square[1]
+          );
+
+
+        if (
+          Math.abs(
+            otherFile -
+            fileIndex
+          ) === 1 &&
+          (
+            otherRank === rank ||
+            Math.abs(
+              otherRank -
+              rank
+            ) === 1
+          )
+        ) {
+
+          queue.push(
+            other
+          );
+
+        }
+
+      }
+
+    }
+
+
+    if (
+      chain.length >= 2
+    ) {
+
+      chains.push(
+        chain
+      );
+
+    }
+
+  }
+
+
+  return chains;
+}
+
+
+/* ---------------------------------------------------------
+   체인의 기초 / 끝
+--------------------------------------------------------- */
+
+function chainBaseAndTip(
+  chain,
+  color
+) {
+
+  if (
+    !chain.length
+  ) {
+
+    return {
+
+      base: null,
+
+      tip: null
+
+    };
+
+  }
+
+
+  const sorted =
+    [...chain].sort(
+      (a, b) => {
+
+        const rankA =
+          Number(
+            a[1]
+          );
+
+
+        const rankB =
+          Number(
+            b[1]
+          );
+
+
+        return color === "w"
+          ? rankA - rankB
+          : rankB - rankA;
+
+      }
+    );
+
+
+  return {
+
+    base:
+      sorted[0],
+
+    tip:
+      sorted[
+        sorted.length - 1
+      ]
+
+  };
+
+}
+
+
+/* ---------------------------------------------------------
+   한 진영의 폰 구조 분석
+--------------------------------------------------------- */
+
+function analyzePawnSide(
+  chess,
+  snapshot,
+  color
+) {
+
+  const pawns =
+    getPawnsByColor(
+      snapshot,
+      color
+    );
+
+
+  const files = {};
+
+
+  for (
+    const file of "abcdefgh"
+  ) {
+
+    files[file] =
+      getPawnsOnFile(
+        pawns,
+        file
+      );
+
+  }
+
+
+  const doubled = [];
+
+
+  for (
+    const file of Object.keys(files)
+  ) {
+
+    if (
+      files[file].length >= 2
+    ) {
+
+      doubled.push({
+
+        file,
+
+        pawns:
+          files[file].map(
+            (pawn) =>
+              pawn.square
+          )
+
+      });
+
+    }
+
+  }
+
+
+  const isolated = [];
+
+
+  for (
+    const pawn of pawns
+  ) {
+
+    const adjacent =
+      adjacentFiles(
+        pawn.square[0]
+      );
+
+
+    const hasFriendlyAdjacentPawn =
+      adjacent.some(
+        (file) =>
+          files[file].length > 0
+      );
+
+
+    if (
+      !hasFriendlyAdjacentPawn
+    ) {
+
+      isolated.push(
+        pawn.square
+      );
+
+    }
+
+  }
+
+
+  const passed = [];
+
+  const protectedPassed = [];
+
+  const connected = [];
+
+  const backward = [];
+
+
+  for (
+    const pawn of pawns
+  ) {
+
+    if (
+      isPassedPawn(
+        snapshot,
+        pawn,
+        color
+      )
+    ) {
+
+      passed.push(
+        pawn.square
+      );
+
+
+      /*
+         보호된 패스드 폰은
+         같은 진영의 인접 폰이 있으면
+         후보로 기록한다.
+      */
+
+      if (
+        isProtectedPassedPawnSafe(
+          pawns,
+          pawn
+        )
+      ) {
+
+        protectedPassed.push(
+          pawn.square
+        );
+
+      }
+
+    }
+
+
+    if (
+      isConnectedPawn(
+        pawns,
+        pawn
+      )
+    ) {
+
+      connected.push(
+        pawn.square
+      );
+
+    }
+
+
+    if (
+      isBackwardPawnCandidate(
+        snapshot,
+        pawn,
+        color
+      )
+    ) {
+
+      backward.push(
+        pawn.square
+      );
+
+    }
+
+  }
+
+
+  const chains =
+    findPawnChains(
+      pawns,
+      color
+    );
+
+
+  const chainDetails =
+    chains.map(
+      (chain) => {
+
+        const ends =
+          chainBaseAndTip(
+            chain,
+            color
+          );
+
+
+        return {
+
+          pawns:
+            chain,
+
+          base:
+            ends.base,
+
+          tip:
+            ends.tip
+
+        };
+
+      }
+    );
+
+
+  const pawnDetails =
+    pawns.map(
+      (pawn) => {
+
+        const defenders =
+          findPawnDefenders(
+            chess,
+            pawn
+          );
+
+
+        return {
+
+          square:
+            pawn.square,
+
+          isDoubled:
+            files[
+              pawn.square[0]
+            ].length >= 2,
+
+          isIsolated:
+            isolated.includes(
+              pawn.square
+            ),
+
+          isPassed:
+            passed.includes(
+              pawn.square
+            ),
+
+          isProtectedPassed:
+            protectedPassed.includes(
+              pawn.square
+            ),
+
+          isConnected:
+            connected.includes(
+              pawn.square
+            ),
+
+          isBackwardCandidate:
+            backward.includes(
+              pawn.square
+            ),
+
+          canAdvance:
+            canPawnAdvance(
+              chess,
+              pawn
+            ),
+
+          defenders
+
+        };
+
+      }
+    );
+
+
+  const breaks =
+    findPawnBreaks(
+      chess,
+      snapshot,
+      color
+    );
+
+
+  const targets =
+    findPawnTargets(
+      chess,
+      snapshot,
+      color
+    );
+
+
+  return {
+
+    color,
+
+    side:
+      colorName(color),
+
+    pawnCount:
+      pawns.length,
+
+    pawns:
+      pawnDetails,
+
+    doubled,
+
+    isolated,
+
+    backward,
+
+    connected,
+
+    passed,
+
+    protectedPassed,
+
+    chains:
+      chainDetails,
+
+    breaks,
+
+    targets
+
+  };
+
+}
+
+
+/* ---------------------------------------------------------
+   보호된 패스드 폰 안전 계산
+--------------------------------------------------------- */
+
+function isProtectedPassedPawnSafe(
+  pawns,
+  pawn
+) {
+
+  const fileIndex =
+    pawn.square.charCodeAt(0) - 97;
+
+
+  const rank =
+    Number(
+      pawn.square[1]
+    );
+
+
+  return pawns.some(
+    (other) => {
+
+      if (
+        other.square ===
+        pawn.square
+      ) {
+
+        return false;
+
+      }
+
+
+      const otherFile =
+        other.square
+          .charCodeAt(0) - 97;
+
+
+      const otherRank =
+        Number(
+          other.square[1]
+        );
+
+
+      return (
+        Math.abs(
+          otherFile -
+          fileIndex
+        ) === 1 &&
+        (
+          otherRank === rank - 1 ||
+          otherRank === rank + 1
+        )
+      );
+
+    }
+  );
+
+}
+
+
+/* ---------------------------------------------------------
+   전체 Pawn Structure
+--------------------------------------------------------- */
+
+function analyzePawnStructure(
+  chess,
+  snapshot
+) {
+
+  currentPawnSnapshot =
+    snapshot;
+
+
+  const white =
+    analyzePawnSide(
+      chess,
+      snapshot,
+      "w"
+    );
+
+
+  const black =
+    analyzePawnSide(
+      chess,
+      snapshot,
+      "b"
+    );
+
+
+  return {
+
+    type:
+      "pawn_structure",
+
+    white,
+
+    black,
+
+    /*
+       이 단계에서는
+       어느 쪽 폰 구조가 우월한지
+       최종 판단하지 않는다.
     */
 
     advantage:
@@ -1572,7 +3240,7 @@ function analyzeSuperiorMinorPieces(
 
 
 /* =========================================================
-   Superior Minor Piece 화면용 설명
+   Superior Minor Piece 화면
 ========================================================= */
 
 function renderMinorPieceList(
@@ -1647,10 +3315,6 @@ function renderMinorPieceList(
 }
 
 
-/* =========================================================
-   Superior Minor Piece 화면
-========================================================= */
-
 function renderSuperiorMinorPieceAnalysis(
   minor
 ) {
@@ -1673,17 +3337,8 @@ function renderSuperiorMinorPieceAnalysis(
   ) {
 
     if (
-      whiteAverage >
+      whiteAverage !==
       blackAverage
-    ) {
-
-      comparisonText =
-        `현재 관측된 활동성 참고값은 백 ${whiteAverage}, 흑 ${blackAverage}입니다. ` +
-        `다만 이것만으로 어느 쪽의 마이너 피스가 우월하다고 판단하지 않습니다.`;
-
-    } else if (
-      blackAverage >
-      whiteAverage
     ) {
 
       comparisonText =
@@ -1694,7 +3349,7 @@ function renderSuperiorMinorPieceAnalysis(
 
       comparisonText =
         `현재 관측된 활동성 참고값은 백과 흑이 ${whiteAverage}로 같습니다. ` +
-        `다만 실제 마이너 피스의 질은 다른 불균형과 함께 판단해야 합니다.`;
+        `실제 마이너 피스의 질은 다른 불균형과 함께 판단해야 합니다.`;
 
     }
 
@@ -1809,7 +3464,377 @@ function renderSuperiorMinorPieceAnalysis(
 
 
 /* =========================================================
-   Material Analyzer 화면
+   Pawn Structure 화면
+========================================================= */
+
+function pawnListText(
+  items
+) {
+
+  if (
+    !items ||
+    !items.length
+  ) {
+
+    return "없음";
+
+  }
+
+
+  return items.join(", ");
+
+}
+
+
+function renderPawnSide(
+  side
+) {
+
+  const doubledText =
+    side.doubled.length
+      ? side.doubled
+          .map(
+            (item) =>
+              `${item.file}-파일 (${item.pawns.join(", ")})`
+          )
+          .join(" / ")
+      : "없음";
+
+
+  const chainText =
+    side.chains.length
+      ? side.chains
+          .map(
+            (chain) =>
+              `${chain.pawns.join("–")} (기초 ${chain.base}, 끝 ${chain.tip})`
+          )
+          .join(" / ")
+      : "없음";
+
+
+  const breakText =
+    side.breaks.length
+      ? side.breaks
+          .map(
+            (item) =>
+              `${item.san} (${item.from}→${item.to})`
+          )
+          .join(", ")
+      : "없음";
+
+
+  const targetText =
+    side.targets.length
+      ? side.targets
+          .map(
+            (item) =>
+              `${item.square} ← ${item.attackers.join(", ")}`
+          )
+          .join(" / ")
+      : "없음";
+
+
+  return `
+
+    <div class="analysis-card">
+
+      <div class="analysis-card-title">
+        ${side.side} 폰 구조
+      </div>
+
+      <div class="analysis-row">
+        <span>폰 수</span>
+        <strong>
+          ${side.pawnCount}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>고립 폰 후보</span>
+        <strong>
+          ${pawnListText(side.isolated)}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>더블 폰</span>
+        <strong>
+          ${doubledText}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>백워드 폰 후보</span>
+        <strong>
+          ${pawnListText(side.backward)}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>연결된 폰</span>
+        <strong>
+          ${pawnListText(side.connected)}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>패스드 폰 후보</span>
+        <strong>
+          ${pawnListText(side.passed)}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>보호된 패스드 폰 후보</span>
+        <strong>
+          ${pawnListText(side.protectedPassed)}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>폰 체인</span>
+        <strong>
+          ${chainText}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>폰 브레이크 후보</span>
+        <strong>
+          ${breakText}
+        </strong>
+      </div>
+
+      <div class="analysis-row">
+        <span>공격 가능한 폰 후보</span>
+        <strong>
+          ${targetText}
+        </strong>
+      </div>
+
+    </div>
+
+  `;
+
+}
+
+
+function renderPawnDetails(
+  side
+) {
+
+  if (
+    !side.pawns.length
+  ) {
+
+    return `
+
+      <div class="analysis-note">
+        현재 이 진영에는 폰이 없습니다.
+      </div>
+
+    `;
+
+  }
+
+
+  return side.pawns.map(
+    (pawn) => {
+
+      const flags = [];
+
+
+      if (pawn.isDoubled) {
+
+        flags.push(
+          "더블 폰"
+        );
+
+      }
+
+
+      if (pawn.isIsolated) {
+
+        flags.push(
+          "고립 후보"
+        );
+
+      }
+
+
+      if (pawn.isBackwardCandidate) {
+
+        flags.push(
+          "백워드 후보"
+        );
+
+      }
+
+
+      if (pawn.isConnected) {
+
+        flags.push(
+          "연결 폰"
+        );
+
+      }
+
+
+      if (pawn.isPassed) {
+
+        flags.push(
+          "패스드 후보"
+        );
+
+      }
+
+
+      if (pawn.isProtectedPassed) {
+
+        flags.push(
+          "보호된 패스드 후보"
+        );
+
+      }
+
+
+      if (pawn.canAdvance) {
+
+        flags.push(
+          "전진 가능"
+        );
+
+      } else {
+
+        flags.push(
+          "즉시 전진 어려움"
+        );
+
+      }
+
+
+      const flagText =
+        flags.length
+          ? flags.join(" · ")
+          : "특별한 구조적 특징 없음";
+
+
+      const defenderText =
+        pawn.defenders.length
+          ? pawn.defenders.join(", ")
+          : "없음";
+
+
+      return `
+
+        <div class="minor-piece-item">
+
+          <div class="minor-piece-header">
+
+            <strong>
+              폰 ${pawn.square}
+            </strong>
+
+          </div>
+
+          <div class="minor-piece-detail">
+
+            ${flagText}
+
+          </div>
+
+          <div class="minor-piece-detail">
+
+            방어자:
+            ${defenderText}
+
+          </div>
+
+        </div>
+
+      `;
+
+    }
+  ).join("");
+
+}
+
+
+function renderPawnStructureAnalysis(
+  pawnStructure
+) {
+
+  return `
+
+    <div class="analysis-card">
+
+      <div class="analysis-card-title">
+        폰 구조
+      </div>
+
+      <div class="analysis-description">
+
+        폰 구조는 현재 포지션에서 어떤 폰이
+        고정되어 있는지, 어떤 폰이 전진 가능한지,
+        어떤 파일과 폰 사슬이 계획의 기반이 될 수 있는지를
+        찾기 위한 기초 자료입니다.
+
+      </div>
+
+      <div class="analysis-note">
+
+        고립 폰·더블 폰·백워드 폰은
+        발견되었다고 해서 자동으로 약점이 아닙니다.
+        실제 공격 가능성, 방어 가능성, 기물의 접근,
+        폰 브레이크와 함께 판단해야 합니다.
+
+      </div>
+
+    </div>
+
+
+    ${renderPawnSide(
+      pawnStructure.white
+    )}
+
+
+    ${renderPawnSide(
+      pawnStructure.black
+    )}
+
+
+    <div class="analysis-card">
+
+      <div class="analysis-card-title">
+        백 폰 상세
+      </div>
+
+      ${renderPawnDetails(
+        pawnStructure.white
+      )}
+
+    </div>
+
+
+    <div class="analysis-card">
+
+      <div class="analysis-card-title">
+        흑 폰 상세
+      </div>
+
+      ${renderPawnDetails(
+        pawnStructure.black
+      )}
+
+    </div>
+
+  `;
+
+}
+
+
+/* =========================================================
+   Material 화면
 ========================================================= */
 
 function renderMaterialAnalysis(
@@ -2091,6 +4116,10 @@ function renderSnapshotSummary(
       snapshot.minorPieces
     )}
 
+    ${renderPawnStructureAnalysis(
+      snapshot.pawnStructure
+    )}
+
     <div class="snapshot-card">
 
       <div class="snapshot-row">
@@ -2128,8 +4157,8 @@ function renderSnapshotSummary(
       <div class="snapshot-note">
 
         현재 단계에서는 체스판의 사실 관계,
-        물질 구조, 마이너 피스의 활동성을
-        수집합니다.
+        물질 구조, 마이너 피스 활동성,
+        폰 구조를 수집합니다.
 
         전략적 판단은 이후 단계에서 추가합니다.
 
@@ -2194,6 +4223,10 @@ function renderDebug(
 
     superiorMinorPiece:
       snapshot.minorPieces,
+
+
+    pawnStructure:
+      snapshot.pawnStructure,
 
 
     white: {
