@@ -1,83 +1,72 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-  <title>체스센스</title>
-
-  <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Human Chess Insight</title>
+<link rel="stylesheet" href="style.css">
+<script>
+  // JS 오류를 화면에 바로 보여주는 진단용 코드
+  window.addEventListener("error", function (e) {
+    var box = document.getElementById("errorBox");
+    if (box) { box.hidden = false; box.textContent = "JS 오류: " + (e.message || "알 수 없음"); }
+  });
+</script>
 </head>
-
 <body>
+<main class="wrap">
+  <header>
+    <h1>Human Chess Insight</h1>
+    <p class="sub">엔진의 숫자를 사람이 이해할 수 있는 생각으로 바꿉니다.</p>
+    <div id="engineStatus" class="status loading">엔진 대기 중…</div>
+  </header>
 
-  <main class="app">
+  <div id="errorBox" class="error" hidden></div>
 
-    <header class="app-header">
-      <h1>체스센스</h1>
-      <p>엔진의 숫자를 사람이 이해할 수 있는 생각으로 바꿉니다.</p>
-    </header>
+  <section id="inputView">
+    <textarea id="pgnInput" placeholder="여기에 PGN을 붙여넣으세요"></textarea>
+    <div class="row">
+      <button id="exampleBtn" type="button">예제 PGN</button>
+      <button id="analyzeBtn" type="button" class="primary">게임 분석 시작</button>
+    </div>
+  </section>
 
-    <section class="input-section">
+  <section id="analysisView" hidden>
+    <div class="row between">
+      <button id="backBtn" type="button">← 입력으로</button>
+      <span id="gameMeta" class="small"></span>
+    </div>
 
-      <h2>게임 분석</h2>
+    <div id="board" class="board"></div>
+    <div class="small center"><span id="positionLabel"></span> · <span id="moveLabel"></span></div>
 
-      <textarea
-        id="pgnInput"
-        placeholder="PGN을 붙여넣으세요."
-        spellcheck="false"
-      ></textarea>
+    <div class="row nav">
+      <button id="firstBtn" type="button">⏮</button>
+      <button id="prevBtn" type="button">◀</button>
+      <button id="nextBtn" type="button">▶</button>
+      <button id="lastBtn" type="button">⏭</button>
+    </div>
 
-      <div class="button-row">
-        <button id="exampleButton" type="button">
-          예제 PGN
-        </button>
+    <div class="card evalCard">
+      <div>평가 <b id="evalValue">—</b></div>
+      <div>depth <b id="depthValue">—</b></div>
+    </div>
+    <div class="bar"><div id="progressBar"></div></div>
 
-        <button id="analyzeButton" type="button">
-          게임 분석 시작
-        </button>
-      </div>
+    <h2>후보 수</h2>
+    <div id="candidateList"></div>
 
-    </section>
+    <h2>사람의 언어로</h2>
+    <div id="positionInsight" class="card"></div>
 
-    <section class="board-section">
+    <h2>세부 요소</h2>
+    <div id="humanFactors"></div>
 
-      <h2>현재 포지션</h2>
+    <h2>수순</h2>
+    <div id="moveList" class="moves"></div>
+  </section>
+</main>
 
-      <div id="board" class="board">
-        <div class="board-placeholder">
-          PGN을 입력하고 분석을 시작하세요.
-        </div>
-      </div>
-
-    </section>
-
-    <section class="analysis-section">
-
-      <h2>포지션 분석</h2>
-
-      <div id="analysisResult" class="analysis-result">
-        <p class="empty-message">
-          아직 분석된 포지션이 없습니다.
-        </p>
-      </div>
-
-    </section>
-
-    <section class="debug-section">
-
-      <details>
-        <summary>DEBUG 정보</summary>
-
-        <pre id="debugOutput">아직 분석 정보가 없습니다.</pre>
-
-      </details>
-
-    </section>
-
-  </main>
-
-  <script type="module" src="app.js"></script>
-
+<script type="module" src="app.js"></script>
 </body>
 </html>
