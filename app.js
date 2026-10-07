@@ -423,6 +423,74 @@ function oppositeColor(color) {
 
 
 /* =========================================================
+   특정 기물의 색에 맞춰 합법적인 이동을 계산
+=========================================================
+
+   chess.moves()는 기본적으로 현재 차례의 기물만
+   합법적인 이동을 생성한다.
+
+   따라서 현재 차례가 백인데 흑 기물을 분석하거나,
+   현재 차례가 흑인데 백 기물을 분석할 경우
+   기존 방식에서는 이동 가능 수가 0으로 나온다.
+
+   이 함수에서는 현재 FEN의 보드 상태는 그대로 유지하고
+   FEN의 side-to-move만 분석하려는 기물의 색으로 바꾼
+   별도의 Chess 객체를 만들어 이동을 계산한다.
+
+========================================================= */
+
+function getLegalMovesForPiece(
+  chess,
+  square,
+  color
+) {
+
+  try {
+
+    const fen =
+      chess.fen();
+
+
+    const fenParts =
+      fen.split(" ");
+
+
+    /*
+       FEN의 두 번째 항목은
+       side to move이다.
+
+       w = white
+       b = black
+    */
+
+    fenParts[1] =
+      color;
+
+
+    const testChess =
+      new Chess(
+        fenParts.join(" ")
+      );
+
+
+    return testChess.moves({
+
+      square,
+
+      verbose: true
+
+    });
+
+  } catch (error) {
+
+    return [];
+
+  }
+
+}
+
+
+/* =========================================================
    보드에서 특정 칸의 기물 가져오기
 ========================================================= */
 
@@ -1029,14 +1097,18 @@ function analyzeMinorPiece(
     pieceData.square;
 
 
+  /*
+     수정:
+     현재 차례와 관계없이
+     해당 기물 색의 합법적인 이동을 계산한다.
+  */
+
   const legalMoves =
-    chess.moves({
-
+    getLegalMovesForPiece(
+      chess,
       square,
-
-      verbose: true
-
-    });
+      color
+    );
 
 
   let safeMoves = 0;
@@ -1082,9 +1154,27 @@ function analyzeMinorPiece(
 
     try {
 
+      /*
+         여기서도 해당 기물의 색이
+         실제로 이동하는지 확인하기 위해
+         기물의 색을 side-to-move로 설정한다.
+      */
+
+      const fen =
+        chess.fen();
+
+
+      const fenParts =
+        fen.split(" ");
+
+
+      fenParts[1] =
+        color;
+
+
       const testChess =
         new Chess(
-          chess.fen()
+          fenParts.join(" ")
         );
 
 
@@ -1673,11 +1763,6 @@ function enemyPawnOnSameFile(
 
 /* ---------------------------------------------------------
    패스드 폰
----------------------------------------------------------
-
-   같은 파일 또는 인접 파일에
-   앞으로 나아갈 상대 폰이 없으면
-   패스드 폰 후보로 기록한다.
 --------------------------------------------------------- */
 
 function isPassedPawn(
@@ -1752,10 +1837,6 @@ function isConnectedPawn(
 
 /* ---------------------------------------------------------
    보호된 패스드 폰
----------------------------------------------------------
-
-   같은 진영의 폰이 옆에서
-   해당 폰을 방어하는 형태인지 확인한다.
 --------------------------------------------------------- */
 
 function isProtectedPassedPawn(
@@ -1844,15 +1925,18 @@ function canPawnAdvance(
 
   try {
 
+    /*
+       수정:
+       현재 차례와 관계없이
+       해당 폰의 색으로 합법적인 이동을 계산한다.
+    */
+
     const moves =
-      chess.moves({
-
-        square:
-          pawn.square,
-
-        verbose: true
-
-      });
+      getLegalMovesForPiece(
+        chess,
+        pawn.square,
+        pawn.color
+      );
 
 
     return moves.some(
@@ -1872,10 +1956,6 @@ function canPawnAdvance(
 
 /* ---------------------------------------------------------
    폰 방어자
----------------------------------------------------------
-
-   해당 폰을 같은 진영 기물이
-   공격 관계상 방어하고 있는지 기록한다.
 --------------------------------------------------------- */
 
 function findPawnDefenders(
@@ -2200,10 +2280,6 @@ function isPieceAttackingSquare(
 
 /* ---------------------------------------------------------
    폰 브레이크 후보
----------------------------------------------------------
-
-   현재 폰 구조에서 상대 폰과 접촉하거나
-   구조를 바꿀 수 있는 전진/캡처 가능성을 기록한다.
 --------------------------------------------------------- */
 
 function findPawnBreaks(
@@ -2226,15 +2302,18 @@ function findPawnBreaks(
     const pawn of pawns
   ) {
 
+    /*
+       수정:
+       현재 차례와 관계없이
+       해당 폰 색으로 이동을 계산한다.
+    */
+
     const moves =
-      chess.moves({
-
-        square:
-          pawn.square,
-
-        verbose: true
-
-      });
+      getLegalMovesForPiece(
+        chess,
+        pawn.square,
+        color
+      );
 
 
     for (
@@ -2374,13 +2453,6 @@ function findPawnBreaks(
 
 /* ---------------------------------------------------------
    폰 타깃 후보
----------------------------------------------------------
-
-   단순히 고립/더블/백워드라는 이유만으로
-   약점이라고 하지 않는다.
-
-   여기서는 상대 기물이 실제로 접근하거나
-   공격할 수 있는 폰을 후보로 기록한다.
 --------------------------------------------------------- */
 
 function findPawnTargets(
@@ -2462,16 +2534,6 @@ function findPawnTargets(
 
 /* ---------------------------------------------------------
    백워드 폰 후보
----------------------------------------------------------
-
-   구현상 보수적으로 판단한다.
-
-   뒤에 있는 폰이 인접 파일의 자기 폰보다
-   전진이 뒤처져 있고,
-   앞으로 나아갈 때 상대 폰 구조와 충돌하는 경우
-   후보로 기록한다.
-
-   이것 역시 최종 약점 판정이 아니다.
 --------------------------------------------------------- */
 
 function isBackwardPawnCandidate(
@@ -2573,12 +2635,6 @@ function isBackwardPawnCandidate(
 
   }
 
-
-  /*
-     상대 폰이 앞에 있거나
-     해당 폰의 전진이 구조적으로 제한되면
-     백워드 후보로 기록한다.
-  */
 
   return enemyPawnAhead(
     snapshot,
@@ -2924,12 +2980,6 @@ function analyzePawnSide(
       );
 
 
-      /*
-         보호된 패스드 폰은
-         같은 진영의 인접 폰이 있으면
-         후보로 기록한다.
-      */
-
       if (
         isProtectedPassedPawnSafe(
           pawns,
@@ -3222,12 +3272,6 @@ function analyzePawnStructure(
     white,
 
     black,
-
-    /*
-       이 단계에서는
-       어느 쪽 폰 구조가 우월한지
-       최종 판단하지 않는다.
-    */
 
     advantage:
       "undetermined",
